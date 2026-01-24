@@ -1,8 +1,8 @@
 # CONTEXT — PG-1 Cook Minigame Audit Index
 
-> Version: v1.6.2
+> Version: v1.6.3
 > Updated: 2026-01-25
-> Previous: v1.6.1 (PG-1.1 Extension APPROVED)
+> Previous: v1.6.2 (Format A 적용)
 
 ## Current Status
 
@@ -20,11 +20,12 @@
 | Priority Gate | S-15/C-10 first | 🔴 REQUIRED |
 
 Evidence (Public):
-- PG1_Implementation_Checklist.md v1.6.2
+- PG1_Implementation_Checklist.md v1.6.3
 - S-11 A/B delta: dishCount 0 -> 1
 - C-08 timer fallback log
 - C-06 corrected policy (disabled in prod)
 - PG-1.1 Approval: ChatGPT (Auditor), 2026-01-25
+- Gate Design: Q1=A (Phase 분리), Q2=YES (FallbackReason 명시)
 
 ### PG-1 Integration (Pending)
 | Item | Description | Status |
@@ -43,6 +44,17 @@ Evidence (Public):
 ```
 
 **공정성 고정**: 게이지 난이도/속도는 모든 플레이어 동일(스킬 기반)
+
+## FallbackReason (v1.6.3 Gate minimum)
+
+```
+- FEATURE_DISABLED
+```
+
+**Policy:**
+- Timer fallback is defined as: `mode="timer" AND FallbackReason != nil`
+- CookTimePhase must never use `mode="timer"` and must never include FallbackReason
+- v1.6.3 fixes the minimum reason set to `FEATURE_DISABLED`; reasons may be extended later without changing the fallback predicate
 
 ## SEALED Exception Hotfix — S-11
 

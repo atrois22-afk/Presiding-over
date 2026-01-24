@@ -1,11 +1,11 @@
 # PG-1 (Cook 미니게임) 구현 체크리스트
 
-**Version**: v1.6.2
+**Version**: v1.6.3
 **Created**: 2026-01-20
 **Updated**: 2026-01-25
 **Status**: 🔒 **PG-1 Core SEALED** (S-01~S-11, C-01~C-08), 🔶 **PG-1.1 Extension APPROVED**
-**Changes**: v1.6.2 - 감리자 공식 승인 포맷(Format A) 적용
-**Previous**: v1.6.1 - PG-1.1 Extension 승인
+**Changes**: v1.6.3 - Gate 템플릿 적용 (S-15/C-10 선행, FallbackReason 정책, Q1=A/Q2=YES)
+**Previous**: v1.6.2 - 감리자 공식 승인 포맷(Format A) 적용
 **Reference**: `FoodTruck_Fun_Replication_Roadmap_v0.3.2.md` §2
 
 ---
@@ -363,112 +363,102 @@ STALE Set result: false STALE_COOK_SESSION
 
 ---
 
-## 8. PG-1.1 Extension (APPROVED) — CookTimePhase 분리
+## 8. PG-1.1 Extension (v1.6.3) — CraftSpeed 의미 일관성 (CookTimePhase 분리)
 
 > **Scope**: PG-1.1 Extension (신규 스코프)
-> **Does NOT modify**: PG-1 Core (S-01~S-11, C-01~C-08) 🔒 SEALED
-> **CraftSpeed Policy**: CookTimePhase duration에만 적용, 미니게임 게이지 난이도/속도는 고정
-> **공정성 고정**: 게이지 난이도/속도는 모든 플레이어 동일(스킬 기반), CraftSpeed는 대기시간 단축만 담당
+> **Core SEALED 유지**: PG-1 Core (S-01~S-11, C-01~C-08) 변경 금지
+> **Design Decision (Auditor)**: Option B 승인 / CraftSpeed는 CookTimePhase duration만 단축
+> **Priority Gate**: S-15/C-10 선행 고정 커밋이 **반드시 1순위**
 
-### 8.0 Scope Summary
+### 8.1 승인 결정 (요약)
 
-| 영역 | 항목 | 상태 |
-|------|------|------|
-| Server | S-12 ~ S-15 | ⏳ 구현 대기 |
-| Client | C-09 ~ C-11 | ⏳ 구현 대기 |
-| Priority | S-15/C-10 선행 | 🔴 REQUIRED |
+- [x] **[DECISION] Q1**: 완료 신호 분리 방식 = **A안 채택** (기존 CraftResponse 유지 + Phase/State 분리)
+- [x] **[DECISION] Q2**: Fallback 트리거 = **Reason 기반 명시** (FallbackReason 없는 mode=timer는 fallback으로 간주하지 않음)
+- [x] **[FAIRNESS]**: 게이지 난이도/속도는 모든 플레이어 동일(스킬 기반) 유지, CraftSpeed는 CookTimePhase duration 단축만 담당
 
-### 8.1 Server (S-12 ~ S-15)
+### 8.2 FallbackReason (v1.6.3 Gate minimum)
 
-- [ ] **S-12**: CookTimePhase 시작 (SubmitCookTap 이후)
-  - 정의: SubmitCookTap(success=true) 이후 CookTimePhase(COOKING) 상태를 서버가 시작
-  - 목적: 미니게임(품질)과 조리시간(속도)을 분리
-  - Exit Evidence:
-    ```
-    [CraftingService] S-12|COOK_TIME_START uid=... slot=... recipe=... baseTime=... speedMult=... finalTime=...
-    [CraftingService] S-12|COOK_TIME_STATE_SET uid=... slot=... state=COOKING
-    [ClientController] CookTimePhase START slot=... duration=...
-    [CraftingService] S-12|COOK_TIME_COMPLETE uid=... slot=... recipe=...
-    [ClientController] CookTimePhase COMPLETE slot=...
-    ```
+```
+- FEATURE_DISABLED
+```
 
-- [ ] **S-13**: CraftSpeed 적용 (타이머만)
-  - 정책 고정: CraftSpeed는 CookTimePhase duration에만 적용
-  - 비적용: cookSession.gaugeSpeed/난이도는 CraftSpeed로 변경하지 않음
-  - Exit Evidence:
-    ```
-    [CraftingService] S-13|CRAFTSPEED_APPLY uid=... slot=... tier=... mult=...
-    [CraftingService] S-12|COOK_TIME_START ... baseTime=5.00 mult=1.00 finalTime=5.00
-    [CraftingService] S-12|COOK_TIME_START ... baseTime=5.00 mult=0.80 finalTime=4.00
-    [CraftingService] S-12|COOK_TIME_START ... baseTime=5.00 mult=0.64 finalTime=3.20
-    [ClientController] CookTimePhase START slot=... duration=3.20
-    ```
+**Policy:**
+- Timer fallback is defined as: `mode="timer" AND FallbackReason != nil`
+- CookTimePhase must never use `mode="timer"` and must never include FallbackReason
+- v1.6.3 fixes the minimum reason set to `FEATURE_DISABLED`; reasons may be extended later without changing the fallback predicate
 
-- [ ] **S-14**: Dish 생성 시점 (타이머 완료 시) 고정
-  - 정의: dish 생성/인벤 반영/완료 신호는 CookTimePhase 완료 시점에서만 발생
-  - 주의: Core(S-11)는 유지, PG-1.1에서는 새 완료 경로로 대체
-  - Exit Evidence:
-    ```
-    BEFORE_TAP dishCount=0
-    [CraftingService] S-12|COOK_TIME_COMPLETE uid=... slot=... recipe=...
-    [CraftingService] S-14|DISH_CREATED uid=... slot=... dishKey=...
-    [DEBUG] SendCraftComplete uid=... dishCount=... sample={...}
-    [MainHUD] P1|SERVE_PANEL_READY slot=... dish=... count=...
-    ```
+### 8.3 Priority Gate (MUST FIRST COMMIT)
 
-- [ ] **S-15**: 응답 분리 (fallback timer와 혼동 금지) 🔴 **FIRST**
-  - 목적: FeatureFlag OFF fallback(timer)와 PG-1.1 CookTimePhase를 응답/로그 의미로 분리
-  - 요구: 클라가 CookTimePhase를 MODE_TIMER_FALLBACK로 오해하지 않도록 phase/state 명시
-  - Exit Evidence:
-    ```
-    [ClientController] CraftResponse mode=cook_minigame slot=... session=...
-    [ClientController] CookTapResponse RECV success=true judgment=... corrected=...
-    [ClientController] CookTimePhase START slot=... duration=...
-    [ClientController] CookTimePhase COMPLETE slot=...
-    [MainHUD] P1|SERVE_PANEL_READY slot=... dish=... count=...
-    ```
+#### S-15 (Server) — Response Semantics Split
 
-### 8.2 Client (C-09 ~ C-11)
+- [ ] **S-15**: CraftResponse의 의미 분리 고정 🔴 **FIRST**
+  - CookTimePhase 경로는 `mode="cook_minigame"`을 유지하고, 반드시 `Phase`로 진행/완료를 구분
+    - 예: `Phase="COOK_TIME_START"` / `Phase="COOK_TIME_COMPLETE"`
+  - Timer fallback 경로는 `mode="timer"`를 유지하되, 반드시 `FallbackReason`을 포함
+    - 예: `FallbackReason="FEATURE_DISABLED"`
+  - **금지**: CookTimePhase 진행/완료를 `mode="timer"`로 보내지 않는다 (P2 재발 원인)
 
-- [ ] **C-09**: 미니게임 종료 → CookTime UI 전환
-  - 정의: CookTapResponse(success=true) 이후, 판정 노출(최소 0.6~1.0s) 후 CookTime UI로 전환
-  - Exit Evidence:
-    ```
-    [CookGaugeUI] Judgment shown: ... corrected=...
-    [CookGaugeUI] Hide reason=COOKTIME_PHASE_ENTER session=...
-    [ClientController] CookTimePhase START slot=... duration=...
-    [CookTimeUI] Show slot=... remaining=...
-    [CookTimeUI] Complete slot=...
-    ```
+  **Exit Evidence (5 lines, REQUIRED):**
+  ```
+  [Server] [S-15] CraftResponse mode=cook_minigame phase=COOK_TIME_START slotId=... duration=...
+  [Server] [S-15] CookTimePhase START slotId=... duration=... craftSpeed=...
+  [Server] [S-15] CraftResponse mode=cook_minigame phase=COOK_TIME_COMPLETE slotId=...
+  [Server] [S-15] CraftResponse mode=timer fallbackReason=FEATURE_DISABLED slotId=... (fallback 케이스에서만)
+  [Server] [S-15] ASSERT semanticsSplit ok (CookTimePhase!=TimerFallback)
+  ```
 
-- [ ] **C-10**: fallback timer와 CookTimePhase 로그/분기 분리 🔴 **FIRST**
-  - 정의: grep 기반 검증 가능하도록 fallback timer와 CookTimePhase 로그 키워드 분리
-  - Exit Evidence:
-    ```
-    [TimerFlow] START slot=... duration=... (fallback 전용)
-    [ClientController] CraftResponse mode=timer slot=... recipe=... (fallback 전용)
-    [ClientController] CookTimePhase START slot=... duration=... (PG-1.1 전용)
-    [ClientController] CookTimePhase COMPLETE slot=... (PG-1.1 전용)
-    [MainHUD] P1|SERVE_PANEL_READY slot=... dish=... count=...
-    ```
+#### C-10 (Client) — UI Routing Split
 
-- [ ] **C-11**: CraftSpeed 체감 확인 (게이지 난이도 고정 + 타이머 단축)
-  - 정의: CraftSpeed tier 변화에 따라 CookTime duration만 짧아지고, gaugeSpeed는 동일
-  - Exit Evidence:
-    ```
-    [CookGaugeUI] Show ... gaugeSpeed=133.3 (tier1)
-    [CookTimeUI] Show ... duration=5.00 (tier1)
-    [CookGaugeUI] Show ... gaugeSpeed=133.3 (tier2 동일)
-    [CookTimeUI] Show ... duration=4.00 (tier2)
-    [CookTimeUI] Show ... duration=3.20 (tier3)
-    ```
+- [ ] **C-10**: 클라이언트 라우팅 규칙 고정 🔴 **FIRST**
+  - `MODE_TIMER_FALLBACK`은 오직 `mode="timer" AND FallbackReason != nil`일 때만 발동
+  - `mode="cook_minigame" + phase="COOK_TIME_START|COMPLETE"`는 CookTimePhase UI 흐름으로 처리
+  - **금지**: `mode="timer"` 단독 수신으로 fallback 처리 (PG-1.1에서 CookTimePhase와 충돌 위험)
 
-### 8.3 Known Risk (P2 재발 방지)
+  **Exit Evidence (5 lines, REQUIRED):**
+  ```
+  [Client] [C-10] CraftResponse mode=cook_minigame phase=COOK_TIME_START slotId=...
+  [Client] [C-10] UI_SWITCH -> COOK_TIME_UI slotId=... duration=...
+  [Client] [C-10] CraftResponse mode=cook_minigame phase=COOK_TIME_COMPLETE slotId=...
+  [Client] [C-10] UI_SWITCH -> SERVE/COMPLETE slotId=...
+  [Client] [C-10] TimerFallback ONLY when fallbackReason present: mode=timer fallbackReason=...
+  ```
 
-- **Risk**: 응답 의미 혼합 시 CookGaugeUI가 MODE_TIMER_FALLBACK로 오해되어 판정 표시/전환이 깨질 수 있음
-- **Mitigation**: S-15/C-10 "응답/로그 분리"를 **선행 고정(첫 커밋)** 후 구현 진행
+### 8.4 PG-1.1 Implementation (After Gate)
 
-### 8.4 구현 순서 (REQUIRED)
+#### S-12 — Start CookTimePhase after SubmitCookTap success
+
+- [ ] **S-12**: SubmitCookTap success=true 이후 CookTimePhase 시작
+  - CookTimePhaseDuration 계산: `baseCookTime × CraftSpeed modifier`
+  - `mode="cook_minigame"` 유지 + `Phase="COOK_TIME_START"` 응답 전송
+
+#### S-13 — Apply CraftSpeed to CookTimePhase duration only
+
+- [ ] **S-13**: CraftSpeed 적용 범위 고정
+  - **적용**: CookTimePhaseDuration 단축
+  - **비적용**: gaugeSpeed/난이도/타겟존
+
+#### S-14 — Dish creation at CookTimePhase completion
+
+- [ ] **S-14**: Dish 생성 시점 이동/고정
+  - CookTimePhase COMPLETE 시점에 dishKey 증가 + SendCraftComplete 호출
+  - PG-1 Core의 S-11 경로는 "보존"하되, PG-1.1 경로에서는 사용하지 않도록 분리
+
+#### C-09 — UI transition: Minigame → CookTimePhase UI
+
+- [ ] **C-09**: 미니게임 판정 표시 후 CookTimePhase UI로 전환
+  - 판정 표시 최소 보장 시간(예: 0.6s) 후 전환(선택)
+
+#### C-11 — CraftSpeed 체감/표시
+
+- [ ] **C-11**: CookTimePhase UI에 duration 표시(또는 진행바) 반영
+  - 최소 요구: duration이 CraftSpeed에 의해 단축됨을 UI/로그로 확인 가능
+
+### 8.5 Known Risk (Non-blocking)
+
+- **P2 재발 위험**: CookTapResponse/CraftResponse 순서 경쟁으로 판정 표시 스킵 가능
+  - Gate(S-15/C-10)에서 의미 분리 고정 후 재평가
+
+### 8.6 구현 순서 (REQUIRED)
 
 1. **첫 커밋**: S-15/C-10 (응답·로그 의미 분리 키워드 고정)
 2. **이후**: S-12 → S-13 → S-14 / C-09 → C-11 순서로 구현
