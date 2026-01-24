@@ -1,10 +1,11 @@
 # PG-1 (Cook 미니게임) 구현 체크리스트
 
-**Version**: v1.4.1
+**Version**: v1.5
 **Created**: 2026-01-20
 **Updated**: 2026-01-25
-**Status**: ✅ 서버 구현 완료 (S-01~S-10), 클라이언트 미착수
-**Changes**: v1.4.1 - Self-Test 템플릿 추가 (§7), v1.4 - S-10 STALE_COOK_SESSION 방어 (감리자 승인)
+**Status**: 🔒 **서버 구현 SEALED** (S-01~S-10), 클라이언트 미착수
+**Changes**: v1.5 - Self-Test PASS (Normal/STALE) 2026-01-25 Owner 검증, **서버 SEALED**
+**Previous**: v1.4.1 - Self-Test 템플릿 (§7), v1.4 - S-10 STALE_COOK_SESSION 방어
 **Reference**: `FoodTruck_Fun_Replication_Roadmap_v0.3.2.md` §2
 
 ---
