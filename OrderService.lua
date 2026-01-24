@@ -338,11 +338,22 @@ end
 function OrderService:SetCookScore(userId, slotId, cookScore, sessionId)
     if not userId or not slotId or not cookScore then
         warn("[OrderService] SetCookScore: missing required params")
-        return false
+        return false, "INVALID_PARAMS"
     end
 
     if not OrderCookScores[userId] then
         OrderCookScores[userId] = {}
+    end
+
+    -- S-10: STALE_COOK_SESSION 방어 (감리자 승인 2026-01-25)
+    -- 정책: 실패 시 기본값 1.0 적용 (게임 진행 보장)
+    local existing = OrderCookScores[userId][slotId]
+    if existing and existing.sessionId ~= sessionId then
+        warn(string.format(
+            "[OrderService] STALE_COOK_SESSION userId=%d slot=%d incoming=%s existing=%s",
+            userId, slotId, sessionId or "nil", existing.sessionId or "nil"
+        ))
+        return false, "STALE_COOK_SESSION"
     end
 
     OrderCookScores[userId][slotId] = {

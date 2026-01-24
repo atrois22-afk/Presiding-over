@@ -1,10 +1,10 @@
 # PG-1 (Cook 미니게임) 구현 체크리스트
 
-**Version**: v1.3
+**Version**: v1.4
 **Created**: 2026-01-20
-**Updated**: 2026-01-20
-**Status**: ✅ 서버 구현 완료 (S-01~S-09), 클라이언트 미착수
-**Changes**: v1.3 - 감리 반영 (이모지→IconKey, T-10 문구 수정, 재료 차감 시점 명시)
+**Updated**: 2026-01-25
+**Status**: ✅ 서버 구현 완료 (S-01~S-10), 클라이언트 미착수
+**Changes**: v1.4 - S-10 STALE_COOK_SESSION 방어 추가 (감리자 승인 2026-01-25)
 **Reference**: `FoodTruck_Fun_Replication_Roadmap_v0.3.2.md` §2
 
 ---
@@ -118,6 +118,13 @@
 - [x] **S-09**: `COOK_JUDGMENT` 로그 포인트 추가
   - uid_hash, recipeId, serverJudgment, clientJudgment, corrected, isTutorial
   - (선택) rtt_ms - 클라에서 측정 시
+
+### 1.4 방어 로직 (감리자 승인 2026-01-25)
+
+- [x] **S-10**: `SetCookScore` STALE_COOK_SESSION 방어 추가
+  - 기존 sessionId와 다른 요청 시 거부 (`return false, "STALE_COOK_SESSION"`)
+  - 정책: 실패 시 기본값 1.0 적용 (게임 진행 보장)
+  - 로그: `STALE_COOK_SESSION userId=... slot=... incoming=... existing=...`
 
 ---
 
