@@ -8,6 +8,11 @@
 **Previous**: v1.4.1 - Self-Test 템플릿 (§7), v1.4 - S-10 STALE_COOK_SESSION 방어
 **Reference**: `FoodTruck_Fun_Replication_Roadmap_v0.3.2.md` §2
 
+**SEALED Scope**: PG-1 Server (S-01~S-10)
+**Evidence Repo (Public)**: Presiding-over / default branch 기준
+**Private SSOT Linkage (Owner asserted)**: FoodTruck commit `244e4f2`
+**SEALED Approved**: ChatGPT (Auditor) 2026-01-25
+
 ---
 
 ## 0. 사전 조건 확인

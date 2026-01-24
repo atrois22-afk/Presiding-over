@@ -6,6 +6,14 @@
 
 ---
 
+## Current Sealed
+
+| Phase | Scope | Status | Evidence (Public) | Private SSOT (Owner asserted) |
+|---|---|---|---|---|
+| PG-1 Server | S-01~S-10 | 🔒 SEALED | PG1_Implementation_Checklist.md v1.5 + Self-Test PASS | FoodTruck `244e4f2` |
+
+---
+
 ## 1. 프로젝트 배경
 
 ### 1.1 FoodTruck이란?
