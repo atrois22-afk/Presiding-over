@@ -1,8 +1,8 @@
 # CONTEXT — PG-1 Cook Minigame Audit Index
 
-> Version: v1.6.9
+> Version: v1.7.0
 > Updated: 2026-01-25
-> Previous: v1.6.8 (S-17 session clear + MIN_COOK_TIME tuning)
+> Previous: v1.6.9 (Track B PASS + S-19 UI Layering PASS)
 
 ## Current Status
 
@@ -244,6 +244,32 @@ function MainHUD:CompleteCookTimePhase(slotId)
     ↓
 [Client] C-11: COOK_TIME_COMPLETE → hide UI, inventory updated
 ```
+
+## Track B (PG-1.1 Extension) — 5-line Exit Evidence (PASS)
+
+> **PASS Date**: 2026-01-25
+> **Auditor**: ChatGPT — APPROVED
+
+```
+1) [Client] [C-10] CraftResponse mode=cook_minigame phase=MINIGAME_START slotId=1
+2) [Client] CookTapResponse ... phase=COOK_TIME_START duration=3.00 slotId=1
+3) [CookTimePhase] START slotId=1 duration=2.40 recipeId=1
+4) [Client] [C-10] CraftResponse mode=cook_minigame phase=COOK_TIME_COMPLETE slotId=1
+5) [Client] [C-11] CookTimePhase COMPLETE slotId=1 dishKey=dish_1 recipeId=1
+```
+
+## S-19 (P2) UI/UX Layering — PASS
+
+> **PASS Date**: 2026-01-25
+
+### Fix Applied
+- Progress bar ZIndex = 1 (restored)
+- Status text separated to TextLabel with ZIndex = 2
+- Text visible above progress bar
+
+### Exit Evidence
+- CookTimePhase 진행 중 progress bar 정상 표시
+- 상태 텍스트가 progress bar 위에 표시 (가려짐 없음)
 
 ## Known Issues (Non-blocking)
 - P2: SendCraftComplete path's CraftResponse (mode=timer/complete) processed first,
