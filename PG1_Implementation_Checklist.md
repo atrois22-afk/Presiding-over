@@ -1,10 +1,10 @@
 # PG-1 (Cook 미니게임) 구현 체크리스트
 
-**Version**: v1.4
+**Version**: v1.4.1
 **Created**: 2026-01-20
 **Updated**: 2026-01-25
 **Status**: ✅ 서버 구현 완료 (S-01~S-10), 클라이언트 미착수
-**Changes**: v1.4 - S-10 STALE_COOK_SESSION 방어 추가 (감리자 승인 2026-01-25)
+**Changes**: v1.4.1 - Self-Test 템플릿 추가 (§7), v1.4 - S-10 STALE_COOK_SESSION 방어 (감리자 승인)
 **Reference**: `FoodTruck_Fun_Replication_Roadmap_v0.3.2.md` §2
 
 ---
@@ -257,6 +257,79 @@
 - [ ] 테스트 시나리오 10개 모두 PASS
 - [ ] 기존 저장/로드 회귀 없음 확인
 - [ ] 감리자 최종 승인
+
+---
+
+## 7. Self-Test 템플릿 (Studio Command Bar)
+
+> **실행 주체**: User (Owner)
+> **실행 환경**: Roblox Studio (Play 모드 또는 Command Bar)
+> **목적**: S-10 STALE_COOK_SESSION 방어 로직 검증
+
+### 7.1 정상 케이스 (Set → Get 소비 → Get 기본값)
+
+```lua
+-- Studio Command Bar에서 실행
+local OS = require(game.ServerScriptService.Server.Services.OrderService)
+local userId = 12345
+local slotId = 1
+
+-- 1. Set
+print("=== TEST: Normal Case ===")
+local success1 = OS:SetCookScore(userId, slotId, 0.9, "session-abc")
+print("Set result:", success1)
+
+-- 2. Get (소비)
+local score1 = OS:GetCookScore(userId, slotId)
+print("Get #1 (expect 0.9):", score1)
+
+-- 3. Get 다시 (삭제됨, 기본값)
+local score2 = OS:GetCookScore(userId, slotId)
+print("Get #2 (expect 1.0):", score2)
+```
+
+**기대 출력:**
+```
+=== TEST: Normal Case ===
+[OrderService] COOKSCORE_SET userId=12345 slot=1 score=0.90 sessionId=session-abc
+Set result: true
+Get #1 (expect 0.9): 0.9
+Get #2 (expect 1.0): 1.0
+```
+
+### 7.2 STALE 인위 케이스 (다른 sessionId로 덮어쓰기 시도)
+
+```lua
+-- Studio Command Bar에서 실행
+local OS = require(game.ServerScriptService.Server.Services.OrderService)
+local userId = 12345
+local slotId = 1
+
+-- 1. 기존 값 설정
+print("=== TEST: STALE Case ===")
+OS:SetCookScore(userId, slotId, 0.9, "session-abc")
+
+-- 2. 다른 sessionId로 덮어쓰기 시도
+local success, reason = OS:SetCookScore(userId, slotId, 0.7, "session-xyz")
+print("STALE Set result:", success, reason)
+```
+
+**기대 출력:**
+```
+=== TEST: STALE Case ===
+[OrderService] COOKSCORE_SET userId=12345 slot=1 score=0.90 sessionId=session-abc
+[OrderService] STALE_COOK_SESSION userId=12345 slot=1 incoming=session-xyz existing=session-abc  (warn)
+STALE Set result: false STALE_COOK_SESSION
+```
+
+### 7.3 결과 공유 시 필수 항목
+
+테스트 완료 후 아래 로그를 복사하여 공유:
+
+| 케이스 | 필수 로그 |
+|--------|----------|
+| 정상 | `COOKSCORE_SET` + `Get #1` + `Get #2` 값 |
+| STALE | `STALE_COOK_SESSION` warn + `success=false` |
 
 ---
 
