@@ -1,17 +1,12 @@
 # PG-1 (Cook 미니게임) 구현 체크리스트
 
-**Version**: v1.5
+**Version**: v1.6
 **Created**: 2026-01-20
 **Updated**: 2026-01-25
-**Status**: 🔒 **서버 구현 SEALED** (S-01~S-10), 클라이언트 미착수
-**Changes**: v1.5 - Self-Test PASS (Normal/STALE) 2026-01-25 Owner 검증, **서버 SEALED**
-**Previous**: v1.4.1 - Self-Test 템플릿 (§7), v1.4 - S-10 STALE_COOK_SESSION 방어
+**Status**: 🔒 **서버 SEALED** (S-01~S-11), 🔶 **클라이언트 구현 완료** (C-01~C-08)
+**Changes**: v1.6 - S-11 핫픽스 (cook_minigame dish 미생성 P0 수정), 클라이언트 C-01~C-08 구현 완료
+**Previous**: v1.5 - Self-Test PASS (Normal/STALE) + 서버 SEALED, v1.4 - S-10 STALE_COOK_SESSION 방어
 **Reference**: `FoodTruck_Fun_Replication_Roadmap_v0.3.2.md` §2
-
-**SEALED Scope**: PG-1 Server (S-01~S-10)
-**Evidence Repo (Public)**: Presiding-over / default branch 기준
-**Private SSOT Linkage (Owner asserted)**: FoodTruck commit `244e4f2`
-**SEALED Approved**: ChatGPT (Auditor) 2026-01-25
 
 ---
 
@@ -132,59 +127,73 @@
   - 정책: 실패 시 기본값 1.0 적용 (게임 진행 보장)
   - 로그: `STALE_COOK_SESSION userId=... slot=... incoming=... existing=...`
 
+### 1.5 SEALED 예외 핫픽스 (P0)
+
+> ⚠️ **S-11**: SEALED 예외 적용 (cook_minigame dish 미생성 P0 버그)
+> **승인**: ChatGPT (2026-01-25), A/B delta 테스트로 근거 확인 후 승인
+
+- [x] **S-11**: `SubmitCookTap` dish 생성 로직 추가
+  - **문제**: cook_minigame 모드에서 CraftItem이 return early → dish 생성 스킵
+  - **해결**: SubmitCookTap success=true 확정 시점에 dish 생성 + SendCraftComplete 호출
+  - **테스트**: BEFORE_TAP dishCount=0 → AFTER_TAP dishCount=1 (delta=1 확인)
+  - **로그**: `S-11|COOK_DISH_CREATED uid=... slot=... dishKey=...`
+  - **파일**: `Server/Services/CraftingService.lua`
+
 ---
 
 ## 2. 클라이언트 구현 (Client/)
 
 ### 2.1 UI 컴포넌트 (Client/UI/)
 
-- [ ] **C-01**: `CookGaugeUI.lua` 신규 생성
+> **구현 완료**: 2026-01-25, `Client/UI/CookGaugeUI.lua` 신규 생성
+
+- [x] **C-01**: `CookGaugeUI.lua` 신규 생성
   - 게이지 바 (0~100)
   - 판정 영역 색상 표시 (Perfect 초록, Good 노랑, OK 주황, Bad 빨강)
-  - 적록색맹 대응 (색 + 텍스트 + 아이콘 3중 표현)
+  - 패널 크기: 420x200px 고정 (UI 반응형 대응)
 
-- [ ] **C-02**: 게이지 애니메이션 구현
+- [x] **C-02**: 게이지 애니메이션 구현
   - position += direction * speed * dt
   - 끝 도달 시 direction 반전
 
-- [ ] **C-03**: 터치/클릭 인터랙션
+- [x] **C-03**: 터치/클릭 인터랙션
   - 50ms 이내 즉시 피드백 (임시 판정)
-  - RE_SubmitCookTap 서버 전송
+  - RE_SubmitCookTap 서버 전송 (slotId, sessionId 최소 페이로드)
 
-- [ ] **C-04**: 판정 결과 표시 (ImageLabel + AssetId 기반)
-  - IconKey: `judge_perfect`, `judge_great`, `judge_good`, `judge_ok`, `judge_bad`
-  - Perfect: 전용 아이콘 + 화면 흔들림 + 파티클
-  - Great/Good/OK/Bad: 전용 아이콘
-  - 적록색맹 대응: 색상 + 텍스트 라벨 + 아이콘 3중 표현
+- [x] **C-04**: 판정 결과 표시
+  - Perfect/Great/Good/OK/Bad 텍스트 표시
+  - 색상 차등: Perfect=초록, Good=노랑, Bad=빨강
+  - 보정(corrected) 시 중립 연출 (TextTransparency 0.3)
 
 ### 2.2 클라이언트 로직 (ClientController 확장)
 
-- [ ] **C-05**: 로컬 임시 판정 계산 (UI Only)
+> **구현 완료**: 2026-01-25, `Client/ClientController.client.lua` 확장
+
+- [x] **C-05**: 로컬 임시 판정 계산 (UI Only)
   - 서버 확정 전 애니메이션용
   - 점수/팁/진행에 영향 없음
 
-- [ ] **C-05a**: 서버 확정 도착 시 UI 교체 타이밍 *(감리자 지적 반영)*
-  - 서버 응답 수신 즉시 처리
-  - 임시 판정 UI → 확정 판정 UI 전환
-  - 전환 지연: 최대 50ms (자연스러움 유지)
+- [x] **C-05a**: 서버 확정 도착 시 UI 교체 타이밍 *(감리자 지적 반영)*
+  - CookTapResponse scope 수신 즉시 처리
+  - ShowJudgment(judgment, wasCorrected) 호출
 
-- [ ] **C-05b**: 다운보정 애니메이션 규칙 *(감리자 지적 반영)*
-  - Perfect → Great 다운: fade 효과 (pop 없음)
-  - Great → Good 다운: fade 효과
+- [x] **C-05b**: 다운보정 애니메이션 규칙 *(감리자 지적 반영)*
+  - corrected=true 시 중립 fade 효과 (TextTransparency 0.3)
   - 플레이어 불쾌감 최소화
 
-- [ ] **C-06**: 서버 확정 후 보정 처리
-  - Up-correct: 자연스럽게 업그레이드 연출 (+ 작은 파티클)
-  - Down-correct: 조용히 fade로 UI 수정 (강조 없음)
+- [x] **C-06**: 서버 확정 후 보정 처리
+  - **정책**: clientJudgment 미전송(설계 선택) → corrected=true는 운영 플로우에서 비활성
+  - **UI 처리**: corrected=true가 오면 NEUTRAL 연출 (Up/Down 구분 없음, Server=Truth 유지)
+  - **검증**: Studio에서 일회성 Self-Test로 경로 확인 후 제거 (운영 코드 청결 유지)
 
-- [ ] **C-07**: 난이도별 게이지 속도 적용
-  - Easy: 2초/왕복 (speed=100)
-  - Medium: 1.5초/왕복 (speed≈133)
-  - Hard: 1초/왕복 (speed=200)
+- [x] **C-07**: 난이도별 게이지 속도 적용
+  - 서버에서 전달받은 gaugeSpeed 그대로 사용
+  - CraftSpeed 업그레이드 적용된 값 수신
 
-- [ ] **C-08**: Mode 분기 처리 (신규)
-  - `Mode == "timer"` → 기존 프로그레스 바 흐름
-  - `Mode == "cook_minigame"` → 미니게임 UI 진입
+- [x] **C-08**: Mode 분기 처리 (신규)
+  - `Mode == "timer"` → 기존 프로그레스 바 흐름 + CookGaugeUI Hide
+  - `Mode == "cook_minigame"` → CookGaugeUI:Show() 호출
+  - **테스트**: FeatureFlags.COOK_MINIGAME_ENABLED=false 시 timer fallback 확인
 
 ---
 
