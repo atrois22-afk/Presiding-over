@@ -1,8 +1,8 @@
 # CONTEXT — PG-1 Cook Minigame Audit Index
 
-> Version: v1.6.7
+> Version: v1.6.9
 > Updated: 2026-01-25
-> Previous: v1.6.6 (C-09/C-11 minimal implementation)
+> Previous: v1.6.8 (S-17 session clear + MIN_COOK_TIME tuning)
 
 ## Current Status
 
@@ -99,6 +99,56 @@ Evidence (Public):
 Exit Evidence (S-16):
 ```
 [CraftingService] S-16|SLOT_UNLOCK uid=N slot=N reason=cook_tap_failed:too_early
+```
+
+## SEALED Exception Hotfix — S-17
+
+- Issue (P0): SubmitCookTap 실패 후 재시도 시 session_already_active 발생
+- Cause: S-16은 슬롯 락만 해제, CookSessions 테이블의 세션은 잔존
+- Fix: Whitelist 방식 세션 정리 (감리자 승인)
+- Approved: ChatGPT (Auditor), 2026-01-25
+
+### Whitelist Policy (SESSION_CLEAR_ERRORS)
+
+| 에러 | 세션 처리 | 이유 |
+|------|----------|------|
+| `too_early` | 삭제 ✅ | 재시도 허용 필요 |
+| `too_late` | 삭제 ✅ | 재시도 허용 필요 |
+| `session_expired` | 삭제 ✅ | 명시적 포함 |
+| `session_mismatch` | **보존** | 정상 세션 보호 + 디버깅 |
+| `session_consumed` | **보존** | 중복 제출 방어 (덮어씀 허용) |
+
+Exit Evidence (S-17):
+```
+[CraftingService] S-16|SLOT_UNLOCK uid=N slot=N reason=cook_tap_failed:too_early
+[CraftingService] S-17|SESSION_CLEAR uid=N slot=N reason=too_early
+```
+
+## SEALED Exception Tuning — MIN_COOK_TIME
+
+- Issue (UX): Normal taps at ~0.97s rejected as too_early
+- Cause: MIN_COOK_TIME=1.5s was overly conservative
+- Fix (Server): PGConfig.MIN_COOK_TIME = 0.5 (was 1.5)
+- Fix (Client): CookGaugeUI minCookTime UX guard + "⏳ Wait..." feedback
+- Approved: ChatGPT (Auditor), 2026-01-25
+
+### Dual Guard Architecture
+
+| Layer | Role | Behavior |
+|-------|------|----------|
+| Server | Truth | Validates elapsed ≥ 0.5s, returns `too_early` if violated |
+| Client | UX | Blocks tap before 0.5s, shows "⏳ Wait..." (prevents round-trip) |
+
+### Payload Addition
+
+```lua
+-- CraftingService.lua cookSessionPayload
+minCookTime = PGConfig.MIN_COOK_TIME  -- 클라 UX 가드용
+```
+
+Exit Evidence (MIN_COOK_TIME):
+```
+[CookGaugeUI] Tap blocked: too early (0.32 < 0.50)
 ```
 
 Evidence excerpt:
