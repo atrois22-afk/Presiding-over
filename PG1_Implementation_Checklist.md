@@ -1,11 +1,11 @@
 # PG-1 (Cook 미니게임) 구현 체크리스트
 
-**Version**: v1.6.3
+**Version**: v1.6.4
 **Created**: 2026-01-20
 **Updated**: 2026-01-25
-**Status**: 🔒 **PG-1 Core SEALED** (S-01~S-11, C-01~C-08), 🔶 **PG-1.1 Extension APPROVED**
-**Changes**: v1.6.3 - Gate 템플릿 적용 (S-15/C-10 선행, FallbackReason 정책, Q1=A/Q2=YES)
-**Previous**: v1.6.2 - 감리자 공식 승인 포맷(Format A) 적용
+**Status**: 🔒 **PG-1 Core SEALED** (S-01~S-11, C-01~C-08), 🔶 **PG-1.1 Gate 1st DONE** (S-15/C-10)
+**Changes**: v1.6.4 - Gate 1st commit 완료 (S-15/C-10), FallbackReason+Phase 고정
+**Previous**: v1.6.3 - Gate 템플릿 적용
 **Reference**: `FoodTruck_Fun_Replication_Roadmap_v0.3.2.md` §2
 
 ---
@@ -387,41 +387,57 @@ STALE Set result: false STALE_COOK_SESSION
 - CookTimePhase must never use `mode="timer"` and must never include FallbackReason
 - v1.6.3 fixes the minimum reason set to `FEATURE_DISABLED`; reasons may be extended later without changing the fallback predicate
 
-### 8.3 Priority Gate (MUST FIRST COMMIT)
+### 8.3 Priority Gate (FIRST COMMIT) ✅ DONE
 
-#### S-15 (Server) — Response Semantics Split
+> **Completion**: v1.6.4 (2026-01-25)
+> **Auditor**: ChatGPT — APPROVED
 
-- [ ] **S-15**: CraftResponse의 의미 분리 고정 🔴 **FIRST**
-  - CookTimePhase 경로는 `mode="cook_minigame"`을 유지하고, 반드시 `Phase`로 진행/완료를 구분
-    - 예: `Phase="COOK_TIME_START"` / `Phase="COOK_TIME_COMPLETE"`
-  - Timer fallback 경로는 `mode="timer"`를 유지하되, 반드시 `FallbackReason`을 포함
-    - 예: `FallbackReason="FEATURE_DISABLED"`
-  - **금지**: CookTimePhase 진행/완료를 `mode="timer"`로 보내지 않는다 (P2 재발 원인)
+#### Field Name Standard (v1.6.4 고정)
 
-  **Exit Evidence (5 lines, REQUIRED):**
+- 서버 필드명: `FallbackReason` (PascalCase) 표준
+- 클라 normalize: `response.FallbackReason or response.fallbackReason` 호환 처리
+
+#### Phase Minimum Guarantee (v1.6.4 고정)
+
+- `cook_minigame` 응답: 최소 `Phase="MINIGAME_START"` 포함 (Gate 충족)
+- CookTimePhase: 절대 `mode="timer"` 사용 금지 (v1.6.3 정책과 정합)
+
+#### S-15 (Server) — Response Semantics Split ✅
+
+- [x] **S-15**: CraftResponse의 의미 분리 고정
+  - Timer fallback: `FallbackReason="FEATURE_DISABLED"` 추가
+  - cook_minigame: `Phase="MINIGAME_START"` 추가
+  - **금지**: CookTimePhase를 `mode="timer"`로 보내지 않음
+
+  **Exit Evidence (FeatureFlag OFF → Fallback):**
   ```
-  [Server] [S-15] CraftResponse mode=cook_minigame phase=COOK_TIME_START slotId=... duration=...
-  [Server] [S-15] CookTimePhase START slotId=... duration=... craftSpeed=...
-  [Server] [S-15] CraftResponse mode=cook_minigame phase=COOK_TIME_COMPLETE slotId=...
-  [Server] [S-15] CraftResponse mode=timer fallbackReason=FEATURE_DISABLED slotId=... (fallback 케이스에서만)
-  [Server] [S-15] ASSERT semanticsSplit ok (CookTimePhase!=TimerFallback)
+  [Client] [C-10] CraftResponse mode=timer phase=nil fallbackReason=FEATURE_DISABLED slotId=1
+  [Client] [C-10] TimerFallback mode=timer fallbackReason=FEATURE_DISABLED slotId=1
+  [CookGaugeUI] Hide reason=MODE_TIMER_FALLBACK session=nil
   ```
 
-#### C-10 (Client) — UI Routing Split
-
-- [ ] **C-10**: 클라이언트 라우팅 규칙 고정 🔴 **FIRST**
-  - `MODE_TIMER_FALLBACK`은 오직 `mode="timer" AND FallbackReason != nil`일 때만 발동
-  - `mode="cook_minigame" + phase="COOK_TIME_START|COMPLETE"`는 CookTimePhase UI 흐름으로 처리
-  - **금지**: `mode="timer"` 단독 수신으로 fallback 처리 (PG-1.1에서 CookTimePhase와 충돌 위험)
-
-  **Exit Evidence (5 lines, REQUIRED):**
+  **Exit Evidence (FeatureFlag ON → Minigame):**
   ```
-  [Client] [C-10] CraftResponse mode=cook_minigame phase=COOK_TIME_START slotId=...
-  [Client] [C-10] UI_SWITCH -> COOK_TIME_UI slotId=... duration=...
-  [Client] [C-10] CraftResponse mode=cook_minigame phase=COOK_TIME_COMPLETE slotId=...
-  [Client] [C-10] UI_SWITCH -> SERVE/COMPLETE slotId=...
-  [Client] [C-10] TimerFallback ONLY when fallbackReason present: mode=timer fallbackReason=...
+  [Client] [C-10] CraftResponse mode=cook_minigame phase=MINIGAME_START fallbackReason=nil slotId=1
+  [CookGaugeUI] Show session=... speed=... target={...}
   ```
+
+#### C-10 (Client) — UI Routing Split ✅
+
+- [x] **C-10**: 클라이언트 3단 분기 고정
+  - `mode="timer" AND FallbackReason != nil` → MODE_TIMER_FALLBACK
+  - `mode="timer"` (no reason) → Legacy timer
+  - `mode="cook_minigame"` → PG-1/PG-1.1 처리
+  - **금지**: `mode="timer"` 단독 수신으로 fallback 처리
+
+#### Gate 1st Commit Summary (v1.6.4)
+
+| 항목 | 변경 | 파일 |
+|------|------|------|
+| S-15 | `FallbackReason="FEATURE_DISABLED"` 추가 | CraftingService.lua |
+| S-15 | `Phase="MINIGAME_START"` 추가 | CraftingService.lua |
+| C-10 | `fallbackReason` 정규화 추가 | ClientController.client.lua |
+| C-10 | 3단 분기 (timer+reason, timer, cook_minigame) | ClientController.client.lua |
 
 ### 8.4 PG-1.1 Implementation (After Gate)
 

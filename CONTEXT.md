@@ -1,8 +1,8 @@
 # CONTEXT — PG-1 Cook Minigame Audit Index
 
-> Version: v1.6.3
+> Version: v1.6.4
 > Updated: 2026-01-25
-> Previous: v1.6.2 (Format A 적용)
+> Previous: v1.6.3 (Gate 템플릿 적용)
 
 ## Current Status
 
@@ -12,20 +12,20 @@
 | Server | S-01~S-11 | 🔒 SEALED |
 | Client | C-01~C-08 | 🔒 SEALED |
 
-### PG-1.1 Extension (APPROVED)
+### PG-1.1 Extension
 | Scope | Items | Status |
 |---|---|---|
-| Server | S-12~S-15 | 🔶 APPROVED |
-| Client | C-09~C-11 | 🔶 APPROVED |
-| Priority Gate | S-15/C-10 first | 🔴 REQUIRED |
+| **Priority Gate** | S-15/C-10 | ✅ **DONE** (v1.6.4) |
+| Server | S-12~S-14 | 🔶 APPROVED |
+| Client | C-09, C-11 | 🔶 APPROVED |
 
 Evidence (Public):
-- PG1_Implementation_Checklist.md v1.6.3
+- PG1_Implementation_Checklist.md v1.6.4
 - S-11 A/B delta: dishCount 0 -> 1
 - C-08 timer fallback log
 - C-06 corrected policy (disabled in prod)
 - PG-1.1 Approval: ChatGPT (Auditor), 2026-01-25
-- Gate Design: Q1=A (Phase 분리), Q2=YES (FallbackReason 명시)
+- Gate 1st commit: S-15/C-10 (FallbackReason + Phase)
 
 ### PG-1 Integration (Pending)
 | Item | Description | Status |
@@ -44,6 +44,30 @@ Evidence (Public):
 ```
 
 **공정성 고정**: 게이지 난이도/속도는 모든 플레이어 동일(스킬 기반)
+
+## Gate 1st Commit (v1.6.4) ✅ DONE
+
+> **Completion**: 2026-01-25
+> **Auditor**: ChatGPT — APPROVED
+
+### Field Name Standard
+- 서버: `FallbackReason` (PascalCase) 표준
+- 클라: `response.FallbackReason or response.fallbackReason` 호환
+
+### Phase Minimum Guarantee
+- `cook_minigame`: 최소 `Phase="MINIGAME_START"` 포함
+- CookTimePhase: 절대 `mode="timer"` 사용 금지
+
+### Exit Evidence (Fallback)
+```
+[Client] [C-10] CraftResponse mode=timer phase=nil fallbackReason=FEATURE_DISABLED slotId=1
+[Client] [C-10] TimerFallback mode=timer fallbackReason=FEATURE_DISABLED slotId=1
+```
+
+### Exit Evidence (Minigame)
+```
+[Client] [C-10] CraftResponse mode=cook_minigame phase=MINIGAME_START fallbackReason=nil slotId=1
+```
 
 ## FallbackReason (v1.6.3 Gate minimum)
 
