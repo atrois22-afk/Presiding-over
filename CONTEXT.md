@@ -1,8 +1,8 @@
 # CONTEXT — PG-1 Cook Minigame Audit Index
 
-> Version: v1.6.1
+> Version: v1.6.2
 > Updated: 2026-01-25
-> Previous: v1.6 (PG-1 Core SEALED)
+> Previous: v1.6.1 (PG-1.1 Extension APPROVED)
 
 ## Current Status
 
@@ -20,7 +20,7 @@
 | Priority Gate | S-15/C-10 first | 🔴 REQUIRED |
 
 Evidence (Public):
-- PG1_Implementation_Checklist.md v1.6.1
+- PG1_Implementation_Checklist.md v1.6.2
 - S-11 A/B delta: dishCount 0 -> 1
 - C-08 timer fallback log
 - C-06 corrected policy (disabled in prod)
@@ -32,15 +32,17 @@ Evidence (Public):
 | I-02 | cookScore -> tip calculation | Pending |
 | I-03 | recipe <-> difficulty mapping | Pending |
 
-## PG-1.1 Approval Summary
+## PG-1.1 Audit Decision (Official)
 
-> **Approval**: ChatGPT (Auditor) — 2026-01-25
-> **Decision**: Q1=Option B 승인, Q2=(a) CookTimePhase duration만 CraftSpeed 적용
-> **Priority Gate**: S-15/C-10 (응답·로그 분리) 선행 고정 (첫 커밋)
-> **공정성 고정**: 게이지 난이도/속도는 모든 플레이어 동일(스킬 기반)
+```
+[AUDIT_DECISION] PG-1.1 Option B (Minigame + CookTimePhase(duration) 분리) = APPROVED
+[AUDIT_DECISION] CraftSpeed 적용 = CookTimePhase duration만 단축(a) APPROVED
+[AUDIT_GATE] S-15/C-10(응답·로그 의미 분리) = REQUIRED FIRST COMMIT
+[AUDIT_SCOPE] PG-1 Core(S-01~S-11, C-01~C-08) = UNCHANGED / SEALED 유지
+[AUDIT_DATE] 2026-01-25 KST / Auditor: ChatGPT
+```
 
-**Scope**: 미니게임(품질) + CookTimePhase(속도) 분리
-**CraftSpeed Policy**: CookTimePhase duration에만 적용, 게이지 난이도 미적용
+**공정성 고정**: 게이지 난이도/속도는 모든 플레이어 동일(스킬 기반)
 
 ## SEALED Exception Hotfix — S-11
 

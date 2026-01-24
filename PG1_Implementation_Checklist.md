@@ -1,24 +1,27 @@
 # PG-1 (Cook 미니게임) 구현 체크리스트
 
-**Version**: v1.6.1
+**Version**: v1.6.2
 **Created**: 2026-01-20
 **Updated**: 2026-01-25
 **Status**: 🔒 **PG-1 Core SEALED** (S-01~S-11, C-01~C-08), 🔶 **PG-1.1 Extension APPROVED**
-**Changes**: v1.6.1 - PG-1.1 Extension 승인 (CookTimePhase 분리, CraftSpeed=duration only)
-**Previous**: v1.6 - S-11 핫픽스 + C-01~C-08 완료
+**Changes**: v1.6.2 - 감리자 공식 승인 포맷(Format A) 적용
+**Previous**: v1.6.1 - PG-1.1 Extension 승인
 **Reference**: `FoodTruck_Fun_Replication_Roadmap_v0.3.2.md` §2
 
 ---
 
-## PG-1.1 Approval Log
+## PG-1.1 Audit Decision (Official)
 
-> **Approval**: ChatGPT (Auditor) — 2026-01-25
-> **Scope**: PG-1.1 Extension (Core v1.6 SEALED 유지)
-> **Decision**: Q1=옵션 B 승인, Q2=(a) CookTimePhase duration만 CraftSpeed 적용
-> **Priority Gate**: S-15/C-10 응답·로그 의미 분리 선행 고정 (첫 커밋)
-> **Evidence Repo**: Presiding-over
+```
+[AUDIT_DECISION] PG-1.1 Option B (Minigame + CookTimePhase(duration) 분리) = APPROVED
+[AUDIT_DECISION] CraftSpeed 적용 = CookTimePhase duration만 단축(a) APPROVED
+[AUDIT_GATE] S-15/C-10(응답·로그 의미 분리) = REQUIRED FIRST COMMIT
+[AUDIT_SCOPE] PG-1 Core(S-01~S-11, C-01~C-08) = UNCHANGED / SEALED 유지
+[AUDIT_DATE] 2026-01-25 KST / Auditor: ChatGPT
+```
 
-**Approved**: PG-1.1 (Option B), CraftSpeed=(a: CookTimePhase duration only), Gate=S-15/C-10 first. (2026-01-25)
+**Evidence Repo**: [Presiding-over](https://github.com/atrois22-afk/Presiding-over)
+**공정성 고정**: 게이지 난이도/속도는 모든 플레이어 동일(스킬 기반)
 
 ---
 
