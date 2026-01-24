@@ -1,8 +1,8 @@
 # CONTEXT — PG-1 Cook Minigame Audit Index
 
-> Version: v1.7.0
+> Version: v1.8.0
 > Updated: 2026-01-25
-> Previous: v1.6.9 (Track B PASS + S-19 UI Layering PASS)
+> Previous: v1.7.0 (PG-1 CLOSED, PG-2 Contract opened)
 
 ## Current Status
 
@@ -274,3 +274,53 @@ function MainHUD:CompleteCookTimePhase(slotId)
 ## Known Issues (Non-blocking)
 - P2: SendCraftComplete path's CraftResponse (mode=timer/complete) processed first,
   CookTapResponse judgment display may be skipped (function: dish creation/serve transition OK)
+
+---
+
+# PG-2 Customer + Patience System
+
+> Status: CONTRACT OPENED (v0.1)
+> Created: 2026-01-25
+
+## Scope
+
+PG-2 = Customer Character + Patience System (Core)
+Goal: "PG-1 + PG-2 완료 시 게임이라 부를 수 있음" 기준 충족.
+
+### Split
+- **PG-2 Core**: CustomerState + Patience decay + timeout fail + cancel/leave
+- **PG-2 Extension**: Customer visuals, 애니메이션, 감정 연출, SFX
+
+## Contract Reference
+
+- FoodTruck: `Docs/PG2_CONTRACT_v0.1.md`
+
+## Exit Evidence (Target)
+
+### Timeout Path (5-line):
+```
+1) PG2|SPAWN uid=N slot=1 customerId=... patienceMax=60.0
+2) PG2|PATIENCE_TICK uid=N slot=1 old=60.0 new=59.0 pct=98.3 reason=idle
+3) PG2|TIMEOUT uid=N slot=1 customerId=... patienceNow=0.0
+4) PG2|LEAVE uid=N slot=1 customerId=... reason=timeout
+5) [OrderService] ORDER_CANCELED uid=N slot=1 reason=patience_timeout
+```
+
+### Serve Path (5-line):
+```
+1) PG2|SPAWN uid=N slot=1 customerId=... patienceMax=60.0
+2) PG2|PATIENCE_TICK uid=N slot=1 old=60.0 new=55.0 pct=91.7 reason=crafting
+3) DELIVER_SETTLE uid=N slot=1 reward=50 tip=12 total=62
+4) PG2|SERVE uid=N slot=1 customerId=... tip=12.00
+5) PG2|LEAVE uid=N slot=1 customerId=... reason=served
+```
+
+## Implementation Status
+
+| Item | Description | Status |
+|------|-------------|--------|
+| Contract | PG2_CONTRACT_v0.1.md | ✅ DONE |
+| PG2Config | Tuning values | ⏳ Pending |
+| CustomerService | Server logic | ⏳ Pending |
+| Client UI | Patience bar | ⏳ Pending |
+| Exit Evidence | Studio 5-line | ⏳ Pending |
