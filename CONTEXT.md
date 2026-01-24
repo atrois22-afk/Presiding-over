@@ -1,8 +1,8 @@
 # CONTEXT — PG-1 Cook Minigame Audit Index
 
-> Version: v1.6.6
+> Version: v1.6.7
 > Updated: 2026-01-25
-> Previous: v1.6.5 (CookTimePhase skeleton)
+> Previous: v1.6.6 (C-09/C-11 minimal implementation)
 
 ## Current Status
 
@@ -88,6 +88,18 @@ Evidence (Public):
 - Cause: cook_minigame CraftItem early return skips timer complete path (SendCraftComplete)
 - Fix: SubmitCookTap success=true triggers dish creation + SendCraftComplete
 - Approved: ChatGPT (Auditor), 2026-01-25 (A/B delta evidence)
+
+## SEALED Exception Hotfix — S-16
+
+- Issue (P0): SubmitCookTap 실패 시 슬롯 영구 잠금
+- Cause: too_early/too_late/session_expired 등 실패 경로에서 SetSlotLock(false) 미호출
+- Fix: UnlockOnce 헬퍼 함수 + 모든 return 경로에서 슬롯 락 해제 보장
+- Approved: ChatGPT (Auditor), 2026-01-25
+
+Exit Evidence (S-16):
+```
+[CraftingService] S-16|SLOT_UNLOCK uid=N slot=N reason=cook_tap_failed:too_early
+```
 
 Evidence excerpt:
 - BEFORE_TAP dishCount=0
