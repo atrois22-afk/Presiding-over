@@ -151,6 +151,10 @@ local function HandleServiceResponse(result)
             end
             response.Updates.Inventory = invToSend
         end
+        -- S-30: Stale2Keys 동기화 (Inventory와 함께 전송)
+        if result.updates.stale2Keys then
+            response.Updates.Stale2Keys = result.updates.stale2Keys
+        end
         if result.updates.orders then
             response.Updates.Orders = result.updates.orders
         end
@@ -263,6 +267,17 @@ local function HandleServiceResponse(result)
     end
     if result.corrected ~= nil then
         response.Corrected = result.corrected
+    end
+
+    -- S-12/S-15: CookTimePhase 응답 필드 (PG-1.1)
+    if result.Phase then
+        response.Phase = result.Phase
+    end
+    if result.CookTimeDuration then
+        response.CookTimeDuration = result.CookTimeDuration
+    end
+    if result.FallbackReason then
+        response.FallbackReason = result.FallbackReason
     end
 
     return response
@@ -531,6 +546,26 @@ function RemoteHandler:ConnectRemotes()
     end
 
     ---------------------------------------------------------------------------
+    -- S-30: RE_ManualDiscard (RemoteEvent - 비동기)
+    ---------------------------------------------------------------------------
+    local RE_ManualDiscard = Remotes:FindFirstChild("RE_ManualDiscard")
+    if RE_ManualDiscard then
+        RE_ManualDiscard.OnServerEvent:Connect(function(player, dishKey)
+            LogServerRecv(player, "ManualDiscard")
+
+            local result = Services.OrderService:ManualDiscard(player, dishKey)
+            local response = HandleServiceResponse(result)
+
+            LogServerSend(player, "ManualDiscard", "DiscardResponse", response)
+            RE_SyncState:FireClient(player, "DiscardResponse", response)
+            FireNoticeIfNeeded(player, response)
+        end)
+        print("[RemoteHandler] RE_ManualDiscard 연결 완료 (S-30)")
+    else
+        warn("[RemoteHandler] RE_ManualDiscard RemoteEvent not found - S-30 disabled")
+    end
+
+    ---------------------------------------------------------------------------
     -- RE_BuyUpgrade (RemoteEvent - 비동기)
     ---------------------------------------------------------------------------
     RE_BuyUpgrade.OnServerEvent:Connect(function(player, upgradeId)
@@ -624,7 +659,7 @@ end
 -- scope: CraftResponse (기존 scope 재사용 - ClientController 분기 최소화)
 --------------------------------------------------------------------------------
 
-function RemoteHandler:BroadcastCraftComplete(player, updates)
+function RemoteHandler:BroadcastCraftComplete(player, updates, overrides)
     -- 가드 1: player 유효성 (task.delay 콜백에서 호출되므로 이중 안전)
     if not player or not player.Parent then
         warn("[RemoteHandler] BroadcastCraftComplete: player invalid")
@@ -637,12 +672,21 @@ function RemoteHandler:BroadcastCraftComplete(player, updates)
         return
     end
 
+    -- S-18 Fix: overrides 파라미터로 mode/phase 오버라이드 지원
+    -- overrides = { mode = "cook_minigame", phase = "COOK_TIME_COMPLETE", ... }
+    overrides = overrides or {}
+
     -- Contract Response 포맷 구성 (G-01 준수)
     -- Phase 6: 2-phase CraftResponse 구분 (start/complete)
+    -- S-18: Mode/Phase 오버라이드 지원 (PG-1.1 CookTimePhase용)
+    -- S-18 감리 요구: Mode는 반드시 non-nil (레거시 호환)
     local response = {
         Success = true,
-        Phase = "complete",
+        Mode = overrides.mode or "timer",               -- S-18: 레거시 기본값 "timer" 보장
+        Phase = overrides.phase or "complete",          -- S-18: phase 오버라이드
         SlotId = updates.slotId,  -- P1-CRIT: 완료된 슬롯 ID (클라이언트 SERVE 전환용)
+        RecipeId = updates.recipeId,                    -- S-18: recipeId 추가
+        DishKey = updates.dishKey,                      -- S-18: dishKey 추가
         Updates = {},
     }
 
@@ -653,6 +697,26 @@ function RemoteHandler:BroadcastCraftComplete(player, updates)
             invToSend[tostring(k)] = v
         end
         response.Updates.Inventory = invToSend
+
+        -- S-30: Stale2Keys 동기화 (Inventory와 함께)
+        response.Updates.Stale2Keys = Services.DataService:GetStale2Keys(player)
+    end
+
+    -- S-24 FIX: Orders 자동 동기화 (reservedDishKey 포함)
+    -- 중앙집중형(Option B): 호출부 누락 방지를 위해 BroadcastCraftComplete에서 항상 동기화
+    local playerData = Services.DataService:GetPlayerData(player)
+    if playerData and playerData.orders then
+        response.Updates.Orders = playerData.orders
+
+        -- S-24 Exit Evidence: CraftComplete 시점 reservation 상태 로깅
+        local slotId = updates.slotId
+        local reservedKey = slotId and playerData.orders[slotId] and playerData.orders[slotId].reservedDishKey
+        print(string.format(
+            "[RemoteHandler] S-24|CRAFTCOMPLETE_SYNC uid=%d slot=%d reserved=%s",
+            player.UserId,
+            slotId or -1,
+            tostring(reservedKey)
+        ))
     end
 
     if updates.craftingState then
@@ -674,7 +738,7 @@ end
 -- Phase 6: BroadcastOrders (rotate 동기화용)
 --------------------------------------------------------------------------------
 
-function RemoteHandler:BroadcastOrders(player, orders, meta)
+function RemoteHandler:BroadcastOrders(player, orders, meta, inventory)
     if not player or not player.Parent then
         warn("[RemoteHandler] BroadcastOrders: player invalid")
         return
@@ -699,6 +763,18 @@ function RemoteHandler:BroadcastOrders(player, orders, meta)
         },
         Meta = meta,  -- { reason="rotate", slot=N, stamp=N }
     }
+
+    -- S-29.2: optional inventory 동기화 (STALE_DISCARD 등 인벤 변경 시)
+    if inventory then
+        local invToSend = {}
+        for k, v in pairs(inventory) do
+            invToSend[tostring(k)] = v  -- 0도 포함 (클라에서 제거 처리)
+        end
+        response.Updates.Inventory = invToSend
+
+        -- S-30: Stale2Keys 동기화 (Inventory와 함께)
+        response.Updates.Stale2Keys = Services.DataService:GetStale2Keys(player)
+    end
 
     LogServerSend(player, "OrderRotate", "OrderResponse", response)
     RE_SyncState:FireClient(player, "OrderResponse", response)

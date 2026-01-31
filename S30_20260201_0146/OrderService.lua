@@ -72,6 +72,7 @@ local OrderCookScores = {}
 
 --------------------------------------------------------------------------------
 -- 지연 로드 헬퍼 (순환 참조 방지)
+-- NOTE: S-24 함수들이 GetDataService를 사용하므로 먼저 정의해야 함
 --------------------------------------------------------------------------------
 
 local function GetDataService()
@@ -79,6 +80,216 @@ local function GetDataService()
         DataService = require(game.ServerScriptService.Server.Services.DataService)
     end
     return DataService
+end
+
+-- PG-2: CustomerService 지연 로드
+local CustomerService = nil
+local function GetCustomerService()
+    if not CustomerService then
+        CustomerService = require(game.ServerScriptService.Server.Services.CustomerService)
+    end
+    return CustomerService
+end
+
+--------------------------------------------------------------------------------
+-- S-24: Dish Reservation API
+-- 목적: 동일 recipeId 주문 2개 + dish 1개일 때 2슬롯 동시 SERVE 활성화 방지
+-- 저장: playerData.orders[slotId].reservedDishKey (DataStore 저장)
+--------------------------------------------------------------------------------
+
+--[[
+    S-24: ReserveDish - dish 생성 시 해당 슬롯에 예약 설정
+    @param player: Player
+    @param slotId: number
+    @param dishKey: string (예: "dish_5")
+    @return boolean (성공 여부)
+]]
+function OrderService:ReserveDish(player, slotId, dishKey)
+    local DS = GetDataService()
+    local playerData = DS:GetPlayerData(player)
+
+    if not playerData or not playerData.orders then
+        warn(string.format("[OrderService] S-24|RESERVE_FAILED uid=%d slot=%d reason=no_data",
+            player.UserId, slotId))
+        return false
+    end
+
+    local order = playerData.orders[slotId]
+    if not order then
+        warn(string.format("[OrderService] S-24|RESERVE_FAILED uid=%d slot=%d reason=no_order",
+            player.UserId, slotId))
+        return false
+    end
+
+    -- S-29.2: stale-first 선택 (level 2→1→0 우선순위)
+    -- NOTE: 버킷 차감은 하지 않음. 레벨 선택만 함.
+    -- 차감 시점: Deliver 성공 또는 GraceExpired (승격/폐기)
+    local reservedLevel = DS:SelectStaleFirst(player, dishKey)
+    if reservedLevel == nil then
+        -- staleCounts가 비어있으면 기존 호환: inventory 기준 Fresh(0)로 가정
+        local invQty = playerData.inventory and playerData.inventory[dishKey] or 0
+        if invQty > 0 then
+            reservedLevel = 0  -- Fresh로 간주
+        else
+            warn(string.format("[OrderService] S-29.2|RESERVE_FAILED uid=%d slot=%d dishKey=%s reason=no_stock",
+                player.UserId, slotId, dishKey))
+            return false
+        end
+    end
+
+    -- 예약 설정
+    order.reservedDishKey = dishKey
+    order.reservedStaleLevel = reservedLevel  -- S-29.2: 소비할 버킷 레벨 기록
+
+    -- S-26: SERVE 유예 시간 설정 (rotate/cancel 보호)
+    local graceSeconds = ServerFlags.SERVE_GRACE_SECONDS or 15
+    order.serveDeadline = os.time() + graceSeconds
+
+    DS:MarkDirty(player)
+
+    -- 로깅 (S-24 Exit Evidence) - S-25: DEBUG 게이팅
+    if ServerFlags.DEBUG_S24 then
+        local invQty = playerData.inventory and playerData.inventory[dishKey] or 0
+        print(string.format("[OrderService] S-24|RESERVE_DISH uid=%d slot=%d dishKey=%s invQty=%d staleLevel=%d",
+            player.UserId, slotId, dishKey, invQty, reservedLevel))
+    end
+
+    return true
+end
+
+--[[
+    S-24: ClearReservation - 주문 교체/취소 시 예약 해제
+    @param player: Player
+    @param slotId: number
+    @param reason: string (로그용)
+]]
+function OrderService:ClearReservation(player, slotId, reason)
+    local DS = GetDataService()
+    local playerData = DS:GetPlayerData(player)
+
+    if not playerData or not playerData.orders then
+        return
+    end
+
+    local order = playerData.orders[slotId]
+    if order and order.reservedDishKey then
+        local oldDishKey = order.reservedDishKey
+        local oldStaleLevel = order.reservedStaleLevel  -- S-29.2
+        order.reservedDishKey = nil
+        order.reservedStaleLevel = nil  -- S-29.2: stale 레벨도 정리
+        order.serveDeadline = nil  -- S-26: 유예 시간도 정리
+        DS:MarkDirty(player)
+
+        -- S-25: DEBUG 게이팅 추가
+        if IS_STUDIO and ServerFlags.DEBUG_S24 then
+            print(string.format("[OrderService] S-24|RESERVATION_CLEARED uid=%d slot=%d dishKey=%s staleLevel=%s reason=%s",
+                player.UserId, slotId, oldDishKey, tostring(oldStaleLevel), reason or "unknown"))
+        end
+    end
+end
+
+--[[
+    S-24: ReconcileReservations - 기존 유저 데이터 마이그레이션
+    패치 전 데이터에 reservedDishKey가 없으면 자동 부여 (softlock 방지)
+
+    @param player: Player
+    실행 시점: PlayerAdded 후, orders/inventory 로드 직후 1회
+]]
+function OrderService:ReconcileReservations(player)
+    local DS = GetDataService()
+    local playerData = DS:GetPlayerData(player)
+
+    if not playerData or not playerData.orders or not playerData.inventory then
+        return
+    end
+
+    local userId = player.UserId
+    local reconciledCount = 0
+    local patchedSlots = {}
+
+    -- S-24 Exit Evidence: 시작 로그 (dishKeys 수 포함)
+    local dishKeyCount = 0
+    for itemKey, _ in pairs(playerData.inventory) do
+        if type(itemKey) == "string" and itemKey:sub(1, 5) == "dish_" then
+            dishKeyCount = dishKeyCount + 1
+        end
+    end
+    print(string.format("[OrderService] S-24|RECONCILE_START uid=%d dishKeys=%d",
+        userId, dishKeyCount))
+
+    -- 각 dish의 사용 가능 수량 추적 (수량만큼만 예약)
+    local availableDishes = {}
+    for itemKey, count in pairs(playerData.inventory) do
+        if type(itemKey) == "string" and itemKey:sub(1, 5) == "dish_" then
+            availableDishes[itemKey] = count
+        end
+    end
+
+    -- slotId 오름차순으로 예약 배분
+    for slotId = 1, ServerFlags.ORDER_SLOT_COUNT do
+        local order = playerData.orders[slotId]
+        if order and order.recipeId then
+            -- 이미 예약이 있으면 스킵
+            if not order.reservedDishKey then
+                local dishKey = "dish_" .. order.recipeId
+                local available = availableDishes[dishKey] or 0
+
+                if available >= 1 then
+                    -- 예약 부여
+                    order.reservedDishKey = dishKey
+                    availableDishes[dishKey] = available - 1
+                    reconciledCount = reconciledCount + 1
+                    table.insert(patchedSlots, slotId)
+
+                    -- S-25: DEBUG 게이팅
+                    if ServerFlags.DEBUG_S24 then
+                        print(string.format("[OrderService] S-24|RESERVE_DISH uid=%d slot=%d dishKey=%s invQty=%d (reconcile)",
+                            userId, slotId, dishKey, available))
+                    end
+                end
+            else
+                -- 기존 예약이 있으면 availableDishes에서 차감
+                local reservedKey = order.reservedDishKey
+                if availableDishes[reservedKey] then
+                    availableDishes[reservedKey] = availableDishes[reservedKey] - 1
+                end
+            end
+        end
+    end
+
+    if reconciledCount > 0 then
+        DS:MarkDirty(player)
+    end
+
+    -- S-24 Exit Evidence: 완료 로그 (항상 출력, patchedSlots 포함)
+    local patchedStr = #patchedSlots > 0 and table.concat(patchedSlots, ",") or "none"
+    print(string.format("[OrderService] S-24|RECONCILE_DONE uid=%d patchedSlots=%s",
+        userId, patchedStr))
+end
+
+--[[
+    S-24: IsSlotDeliverable - 슬롯에 배달 가능한 dish가 있는지 확인
+    ESCAPE_HELD_DISH 다중 처리에서 이미 배달 가능한 슬롯 스킵용
+
+    S-28: reservation 기반으로 변경
+    - deliverable = "예약(reservedDishKey)이 있고" + "그 dish 수량이 1 이상"
+
+    @param playerData: table (orders, inventory 포함)
+    @param slotId: number
+    @return boolean
+]]
+function OrderService:IsSlotDeliverable(playerData, slotId)
+    local order = playerData.orders and playerData.orders[slotId]
+    if not order or not order.recipeId then
+        return false
+    end
+    -- S-28: reservation 없으면 deliverable 아님
+    if not order.reservedDishKey then
+        return false
+    end
+    local inv = playerData.inventory or {}
+    local qty = inv[order.reservedDishKey] or 0
+    return (tonumber(qty) or 0) >= 1
 end
 
 --------------------------------------------------------------------------------
@@ -206,6 +417,7 @@ function OrderService:Init()
 
                 self:InitOrderStamp(player)
                 self:InitW3NextForExistingOrders(player)  -- Track B Fix: 기존 Hard 주문 run_id 초기화
+                self:ReconcileReservations(player)  -- S-24: 기존 유저 예약 마이그레이션
 
                 local escapeResult = self:ValidateBoardEscapePath(player, nil)
                 if escapeResult then
@@ -723,6 +935,14 @@ function OrderService:RefillOrders(player)
         end
     end
 
+    -- PG-2: 새로 채운 슬롯에 Customer 스폰
+    local CS = GetCustomerService()
+    if CS and CS.SpawnCustomer then
+        for _, slotId in ipairs(filledSlots) do
+            CS:SpawnCustomer(player, slotId)
+        end
+    end
+
     if #filledSlots > 0 then
         DS:MarkDirty(player)
 
@@ -778,15 +998,22 @@ function OrderService:GetFIFOSlot(player, respectMinLifetime, excludeSlotId)
             if slotId ~= excludeSlotId then
                 -- P1-ORDER-INVARIANT: LOCK 슬롯 제외 (I-07)
                 if not self:IsSlotLocked(userId, slotId) then
-                    local stamp = self:GetOrderStamp(player, slotId)
-                    local age = now - stamp
+                    -- S-26: serveDeadline 유효한 슬롯 제외 (SERVE 대기 중)
+                    local order = playerData.orders[slotId]
+                    local deadline = order and order.serveDeadline
+                    if deadline and deadline > now then
+                        -- SERVE 유예 시간 내: rotate 대상 제외
+                    else
+                        local stamp = self:GetOrderStamp(player, slotId)
+                        local age = now - stamp
 
-                    -- MIN_LIFETIME 체크
-                    local passesMinLifetime = (not respectMinLifetime) or (age >= minLifetime)
+                        -- MIN_LIFETIME 체크
+                        local passesMinLifetime = (not respectMinLifetime) or (age >= minLifetime)
 
-                    if passesMinLifetime and stamp < oldestTime then
-                        oldestTime = stamp
-                        oldestSlot = slotId
+                        if passesMinLifetime and stamp < oldestTime then
+                            oldestTime = stamp
+                            oldestSlot = slotId
+                        end
                     end
                 end
             end
@@ -797,12 +1024,240 @@ function OrderService:GetFIFOSlot(player, respectMinLifetime, excludeSlotId)
 end
 
 --------------------------------------------------------------------------------
+-- S-26: RotateSlot (슬롯 강제 교체 - 공용 함수)
+--------------------------------------------------------------------------------
+
+--[[
+    특정 슬롯을 새 주문으로 교체 (rotate_one_slot, grace_expired에서 공용)
+
+    @param player: Player
+    @param slotId: number
+    @param reason: string (timer_rotate, grace_expired_rotate 등)
+    @return boolean (성공 여부)
+]]
+function OrderService:RotateSlot(player, slotId, reason)
+    local DS = GetDataService()
+    local playerData = DS:GetPlayerData(player)
+
+    if not playerData or not playerData.orders then
+        return false
+    end
+
+    -- nil 슬롯은 rotate 불가 (INVARIANT)
+    if not playerData.orders[slotId] then
+        return false
+    end
+
+    local userId = player.UserId
+
+    -- S-24: 기존 주문의 예약 정리 (교체 전)
+    self:ClearReservation(player, slotId, reason)
+
+    -- 새 주문 생성 및 교체
+    local newOrder = self:GenerateOrder(slotId)
+    playerData.orders[slotId] = newOrder
+    self:UpdateOrderStamp(player, slotId)
+    DS:MarkDirty(player)
+
+    -- Track B-C: ROTATE path Hard 주문 run_id 초기화
+    W3NextLogger.LogOrderCreated({
+        recipeId = newOrder.recipeId,
+        userId = userId,
+        slotId = slotId,
+    })
+
+    -- S-26.1: nil 방어 (로그 출력 전에 정의)
+    local reasonStr = reason or ""
+
+    -- S-26: 운영 로그 (reason 포함)
+    print(string.format(
+        "[OrderService] S-26|ROTATE uid=%d slot=%d newRecipe=%d reason=%s",
+        userId, slotId, newOrder.recipeId, reasonStr
+    ))
+
+    -- S-26.1: grace_expired 사유일 때는 ESCAPE 스킵 (15초 페널티 유지)
+    -- 이유: dish가 제때 납품되지 않은 것에 대한 페널티로 dish는 고아 상태로 유지
+    local isGraceExpired = (reasonStr == "grace_expired_rotate" or reasonStr == "grace_expired_timeout")
+    if isGraceExpired then
+        -- Studio에서만 로그 출력 (운영 스팸 방지)
+        if IS_STUDIO then
+            print(string.format(
+                "[OrderService] S-26.1|ESCAPE_SKIPPED uid=%d slot=%d reason=%s",
+                userId, slotId, reasonStr
+            ))
+        end
+    else
+        -- ValidateBoardEscapePath 실행 (timer_rotate 등 일반 사유)
+        self:ValidateBoardEscapePath(player, slotId)
+    end
+
+    -- 클라이언트에 orders 동기화
+    -- S-29.2: inventory 포함 (STALE_DISCARD 후 인벤 변경 반영)
+    if _remoteHandler then
+        local stamp = self:GetOrderStamp(player, slotId)
+        _remoteHandler:BroadcastOrders(player, playerData.orders, {
+            reason = reason,
+            slot = slotId,
+            stamp = stamp,
+        }, playerData.inventory)
+    end
+
+    return true
+end
+
+--------------------------------------------------------------------------------
+-- S-26: HandleServeGraceExpired (유예 만료 즉시 후속 처리)
+--------------------------------------------------------------------------------
+
+--[[
+    serveDeadline 만료 시 즉시 후속 처리 (CustomerService에서 호출)
+
+    @param player: Player
+    @param slotId: number
+    @param patienceNow: number (현재 인내심)
+]]
+function OrderService:HandleServeGraceExpired(player, slotId, patienceNow)
+    local DS = GetDataService()
+    local playerData = DS:GetPlayerData(player)
+
+    if not playerData or not playerData.orders then
+        return
+    end
+
+    local order = playerData.orders[slotId]
+    if not order then
+        return
+    end
+
+    -- 만료 확인 (이중 체크)
+    if not order.serveDeadline then
+        return
+    end
+
+    local now = os.time()
+    if order.serveDeadline > now then
+        return  -- 아직 만료 안 됨
+    end
+
+    -- serveDeadline 제거 (만료 처리 완료 마킹)
+    order.serveDeadline = nil
+
+    local uid = player.UserId
+
+    ----------------------------------------------------------------------------
+    -- S-29.2: Stale 승격/폐기 처리 (serveDeadline 만료 = 납품 실패)
+    ----------------------------------------------------------------------------
+    local dishKey = order.reservedDishKey
+    local reservedLevel = order.reservedStaleLevel
+
+    if dishKey and reservedLevel ~= nil then
+        local inv = playerData.inventory and playerData.inventory[dishKey] or 0
+        local b0 = DS:GetStaleBucketValue(player, dishKey, 0)
+        local b1 = DS:GetStaleBucketValue(player, dishKey, 1)
+        local b2 = DS:GetStaleBucketValue(player, dishKey, 2)
+
+        -- 소스 버킷 확인
+        local sourceCount = DS:GetStaleBucketValue(player, dishKey, reservedLevel)
+
+        if sourceCount <= 0 then
+            -- 가드: no-op + warn (음수 방지)
+            print(string.format(
+                "[OrderService] S-29.2|STALE_HEAL_WARN uid=%d dishKey=%s reason=negative_source level=%d current=%d",
+                uid, dishKey, reservedLevel, sourceCount
+            ))
+        else
+            local nextLevel = reservedLevel + 1
+
+            if nextLevel >= 3 then
+                -- Rotten(3): 자동 폐기
+                -- 버킷에서 제거
+                DS:DecrementStaleBucket(player, dishKey, reservedLevel, 1)
+
+                -- inventory에서 제거
+                if playerData.inventory and playerData.inventory[dishKey] then
+                    playerData.inventory[dishKey] = playerData.inventory[dishKey] - 1
+                    if playerData.inventory[dishKey] <= 0 then
+                        playerData.inventory[dishKey] = nil
+                    end
+                end
+
+                -- 로그
+                print(string.format(
+                    "[OrderService] S-29.2|STALE_DISCARD uid=%d dishKey=%s fromLevel=%d reason=stale_rotten inv=%d b0=%d b1=%d b2=%d",
+                    uid, dishKey, reservedLevel, inv, b0, b1, b2
+                ))
+
+                -- 팝업 전송 (세션 1회) - A: dishKey 포함
+                if not DS:HasSentStaleNotice(player, dishKey, 3) then
+                    DS:MarkStaleNoticeSent(player, dishKey, 3)
+                    DS:SendNotice(player, "stale_discard", "warning", "stale_discard", { dishKey = dishKey })
+                    print(string.format(
+                        "[OrderService] S-29.2|NOTICE_SENT uid=%d key=%s level=3",
+                        uid, dishKey
+                    ))
+                end
+            else
+                -- 승격: level → level+1
+                DS:DecrementStaleBucket(player, dishKey, reservedLevel, 1)
+                DS:IncrementStaleBucket(player, dishKey, nextLevel, 1)
+
+                -- 로그
+                print(string.format(
+                    "[OrderService] S-29.2|STALE_UPGRADE uid=%d dishKey=%s from=%d to=%d inv=%d b0=%d b1=%d b2=%d",
+                    uid, dishKey, reservedLevel, nextLevel, inv, b0, b1, b2
+                ))
+
+                -- 팝업 전송 (세션 1회) - A: dishKey 포함
+                if not DS:HasSentStaleNotice(player, dishKey, nextLevel) then
+                    DS:MarkStaleNoticeSent(player, dishKey, nextLevel)
+                    DS:SendNotice(player, "stale_upgrade", "warning", "stale_upgrade_" .. tostring(nextLevel), { dishKey = dishKey })
+                    print(string.format(
+                        "[OrderService] S-29.2|NOTICE_SENT uid=%d key=%s level=%d",
+                        uid, dishKey, nextLevel
+                    ))
+                end
+            end
+        end
+    end
+    ----------------------------------------------------------------------------
+
+    DS:MarkDirty(player)
+
+    -- S-26: 운영 로그
+    local action = (patienceNow <= 0) and "cancel" or "rotate"
+    print(string.format(
+        "[OrderService] S-26|GRACE_EXPIRED uid=%d slot=%d action=%s patience=%.1f",
+        uid, slotId, action, patienceNow
+    ))
+
+    -- S-26/PG2 핫픽스: Customer 세션 정리 보장
+    local CS = GetCustomerService()
+
+    -- 분기: patience에 따라 cancel 또는 rotate
+    if patienceNow <= 0 then
+        -- 즉시 cancel (손님 이미 떠날 상태)
+        local cancelled = self:CancelOrder(player, slotId, "grace_expired_timeout")
+        if cancelled and CS then
+            CS:RemoveCustomer(player, slotId, "grace_expired_timeout")
+        end
+    else
+        -- 즉시 rotate (주문 교체)
+        local rotated = self:RotateSlot(player, slotId, "grace_expired_rotate")
+        if rotated and CS then
+            CS:RespawnCustomer(player, slotId, "grace_expired_rotate")
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
 -- Phase 0: rotate_one_slot (주기적 교체)
 --------------------------------------------------------------------------------
 
 --[[
-    FIFO로 1개 슬롯 교체
+    FIFO로 1개 슬롯 교체 (타이머 기반)
     SEALED INVARIANT: nil 개수는 변하지 않음 (nil 슬롯 미접촉)
+
+    S-26: 내부적으로 RotateSlot 호출
 
     @param player: Player
     @return rotatedSlotId: number? (nil이면 교체 안 됨)
@@ -834,10 +1289,11 @@ function OrderService:rotate_one_slot(player)
 
     -- FIFO 슬롯 선택 (MIN_LIFETIME 준수, excludeSlotId 없음)
     -- P1-ORDER-INVARIANT: GetFIFOSlot 내부에서 LOCK 슬롯 제외됨
+    -- S-26: GetFIFOSlot 내부에서 serveDeadline 슬롯도 제외됨
     local targetSlot = self:GetFIFOSlot(player, true, nil)
 
     if not targetSlot then
-        -- 모든 슬롯이 MIN_LIFETIME 이내 또는 일부 LOCK
+        -- 모든 슬롯이 MIN_LIFETIME 이내 또는 일부 LOCK 또는 serveDeadline 보호
         if IS_STUDIO then
             local stamps = {}
             local locks = {}
@@ -856,38 +1312,10 @@ function OrderService:rotate_one_slot(player)
         return nil
     end
 
-    -- 새 주문 생성 및 교체
-    local newOrder = self:GenerateOrder(targetSlot)
-    playerData.orders[targetSlot] = newOrder
-    self:UpdateOrderStamp(player, targetSlot)
-    DS:MarkDirty(player)
-
-    -- Track B-C: ROTATE path Hard 주문 run_id 초기화 (2026-01-18)
-    -- LogOrderCreated는 내부에서 Hard 여부 체크 (non-Hard는 무시됨)
-    W3NextLogger.LogOrderCreated({
-        recipeId = newOrder.recipeId,
-        userId = player.UserId,
-        slotId = targetSlot,
-    })
-
-    if IS_STUDIO then
-        print(string.format(
-            "[OrderService] ROTATE uid=%d slot=%d newRecipe=%d",
-            player.UserId, targetSlot, newOrder.recipeId
-        ))
-    end
-
-    -- ValidateBoardEscapePath 실행 (1 tick 1 change: excludeSlotId 적용)
-    self:ValidateBoardEscapePath(player, targetSlot)
-
-    -- Phase 6: 클라이언트에 orders 동기화 (rotate 버그 수정)
-    if _remoteHandler then
-        local stamp = self:GetOrderStamp(player, targetSlot)
-        _remoteHandler:BroadcastOrders(player, playerData.orders, {
-            reason = "rotate",
-            slot = targetSlot,
-            stamp = stamp,
-        })
+    -- S-26: RotateSlot 공용 함수 호출 (코드 중복 제거)
+    local success = self:RotateSlot(player, targetSlot, "timer_rotate")
+    if not success then
+        return nil
     end
 
     return targetSlot
@@ -916,18 +1344,15 @@ end
     납품 가능한 주문 개수
 ]]
 function OrderService:GetDeliverableOrderCount(playerData)
-    if not playerData or not playerData.orders or not playerData.inventory then
+    if not playerData or not playerData.orders then
         return 0
     end
 
+    -- S-28: IsSlotDeliverable() 호출로 통일 (reservation 기반)
     local count = 0
     for slotId = 1, ServerFlags.ORDER_SLOT_COUNT do
-        local order = playerData.orders[slotId]
-        if order then
-            local dishKey = "dish_" .. order.recipeId
-            if playerData.inventory[dishKey] and playerData.inventory[dishKey] >= 1 then
-                count = count + 1
-            end
+        if self:IsSlotDeliverable(playerData, slotId) then
+            count = count + 1
         end
     end
     return count
@@ -1111,46 +1536,212 @@ function OrderService:ValidateBoardEscapePath(player, excludeSlotId)
     local heldDishRecipeIds = self:GetHeldDishRecipeIds(playerData.inventory)
     local deliverableCount = self:GetDeliverableOrderCount(playerData)
 
-    if #heldDishRecipeIds > 0 and deliverableCount == 0 then
-        -- 보유 dish 중 하나라도 보드에 매칭되는 주문이 있는지 확인
-        local boardRecipes = self:GetBoardRecipeIds(playerData)
-        local hasMatchingOrder = false
-        for _, dishRecipeId in ipairs(heldDishRecipeIds) do
-            if boardRecipes[dishRecipeId] then
-                hasMatchingOrder = true
-                break
-            end
-        end
+    -- S-28: orphanCount 기반 트리거/스킵 판단 (기존 boardRecipes 방식 대체)
+    -- SSOT: orphanCount = max(0, inventoryCount - reservedCount)
 
-        if not hasMatchingOrder then
-            -- 강제로 보유 dish에 맞는 주문 생성
-            local targetSlot = self:GetFIFOSlot(player, false, excludeSlotId)  -- MIN_LIFETIME 무시
-            if targetSlot then
-                local forcedRecipeId = heldDishRecipeIds[1]  -- 첫 번째 보유 dish
-                local recipe = GameData.GetRecipeById(forcedRecipeId)
-                playerData.orders[targetSlot] = {
-                    slotId = targetSlot,
-                    recipeId = forcedRecipeId,
-                    reward = recipe and recipe.reward or 50,
-                }
-                self:UpdateOrderStamp(player, targetSlot)
-                DS:MarkDirty(player)
-
-                -- W3-NEXT: Hard 레시피면 ORDER_CREATED 로그
-                W3NextLogger.LogOrderCreated({
-                    recipeId = forcedRecipeId,
-                    userId = player.UserId,
-                    slotId = targetSlot,
-                })
-
-                print(string.format(
-                    "[OrderService] ESCAPE_HELD_DISH uid=%d slot=%d forcedRecipeId=%d reason=deliverable_zero",
-                    player.UserId, targetSlot, forcedRecipeId
-                ))
-                return targetSlot
-            end
+    -- 1) reservedCount 계산 (dishKey 기준)
+    local reservedCount = {}
+    for slotId = 1, ServerFlags.ORDER_SLOT_COUNT do
+        local o = playerData.orders[slotId]
+        if o and o.reservedDishKey then
+            reservedCount[o.reservedDishKey] = (reservedCount[o.reservedDishKey] or 0) + 1
         end
     end
+
+    -- 2) orphanCount 기반으로 "배정 가능한 orphan dish 존재" 판단
+    local inv = playerData.inventory or {}
+    local hasAssignableOrphan = false
+
+    for _, rid in ipairs(heldDishRecipeIds) do
+        local dishKey = "dish_" .. rid
+        local invCount = tonumber(inv[dishKey] or 0) or 0
+        local resCount = tonumber(reservedCount[dishKey] or 0) or 0
+        local orphan = math.max(invCount - resCount, 0)
+
+        if orphan > 0 then
+            -- S-28 FIX: "배정 가능 슬롯" 존재 검사 (IsSlotDeliverable 기반)
+            -- ESCAPE_MULTI_ASSIGN의 실제 배정 조건과 일치시킴
+            for slotId = 1, ServerFlags.ORDER_SLOT_COUNT do
+                if slotId ~= excludeSlotId then
+                    local o = playerData.orders[slotId]
+                    if o and not self:IsSlotDeliverable(playerData, slotId) then
+                        hasAssignableOrphan = true
+                        break
+                    end
+                end
+            end
+        end
+
+        if hasAssignableOrphan then break end
+    end
+
+    if not hasAssignableOrphan then
+        -- S-28: 배정 가능한 orphan 없음 → ESCAPE 스킵
+        if ServerFlags.DEBUG_S24 then
+            print(string.format("[OrderService] S-24|ESCAPE_SKIPPED uid=%d reason=no_assignable_orphan held=%d deliverable=%d",
+                player.UserId, #heldDishRecipeIds, deliverableCount))
+        end
+    else
+            -- 매칭 안 된 dish 있음 → ESCAPE 실행
+            --------------------------------------------------------------------
+            -- S-24 다중 처리: 보유 dish를 최대 3슬롯에 배치
+            -- 규칙: 3동일 방지 (ORDER_VARIETY)
+            --------------------------------------------------------------------
+
+            -- 1. 보유 dish를 { dishKey, recipeId, qty } 형태로 수집
+            local heldDishes = {}
+            for itemKey, count in pairs(playerData.inventory) do
+                if type(itemKey) == "string" and itemKey:sub(1, 5) == "dish_" and count >= 1 then
+                    local recipeId = tonumber(itemKey:sub(6))
+                    if recipeId then
+                        table.insert(heldDishes, {
+                            dishKey = itemKey,
+                            recipeId = recipeId,
+                            qty = count,
+                        })
+                    end
+                end
+            end
+
+            local dishKinds = #heldDishes
+            local dishTotal = 0
+            for _, d in ipairs(heldDishes) do
+                dishTotal = dishTotal + d.qty
+            end
+
+            print(string.format(
+                "[OrderService] S-24|ESCAPE_MULTI_START uid=%d dishKinds=%d dishTotal=%d",
+                player.UserId, dishKinds, dishTotal
+            ))
+
+            -- 2. 슬롯별로 강제 주문 생성
+            local assignedCount = 0
+            local assignedRecipes = {}  -- 3동일 방지용
+            local _escapeCS = GetCustomerService()  -- S-29.1: 루프 전 1회 캐시
+
+            for slotId = 1, ServerFlags.ORDER_SLOT_COUNT do
+                if slotId == excludeSlotId then
+                    -- 방금 변경된 슬롯은 스킵
+                elseif self:IsSlotDeliverable(playerData, slotId) then
+                    -- 이미 납품 가능한 슬롯은 건드리지 않음
+                else
+                    -- 사용 가능한 dish 찾기
+                    local selectedDish = nil
+                    local selectedStaleLevel = nil
+                    local fallbackStale2 = nil  -- S-29.2 버그픽스: Stale II only fallback
+                    local DS = GetDataService()
+                    for _, dish in ipairs(heldDishes) do
+                        if dish.qty >= 1 then
+                            -- 3동일 방지: 이미 2슬롯에 같은 recipeId가 있으면 스킵
+                            local sameRecipeCount = assignedRecipes[dish.recipeId] or 0
+                            if sameRecipeCount < 2 then
+                                -- S-29.2: stale-first 선택 (2→1→0)
+                                local staleLevel = DS:SelectStaleFirst(player, dish.dishKey)
+                                if staleLevel == nil then
+                                    staleLevel = 0  -- 호환: staleCounts 없으면 Fresh
+                                end
+
+                                -- S-29.2: stale >= 2면 ESCAPE 후보에서 후순위 (완전 배제 아님)
+                                if staleLevel >= 2 then
+                                    print(string.format(
+                                        "[OrderService] S-29.2|ESCAPE_SKIP_STALE uid=%d dishKey=%s level=%d",
+                                        player.UserId, dish.dishKey, staleLevel
+                                    ))
+                                    -- S-29.2 버그픽스: fallback 후보 기록 (첫 번째만)
+                                    if not fallbackStale2 then
+                                        fallbackStale2 = { dish = dish, level = staleLevel }
+                                    end
+                                else
+                                    selectedDish = dish
+                                    selectedStaleLevel = staleLevel
+                                    break
+                                end
+                            end
+                        end
+                    end
+
+                    -- S-29.2 버그픽스: Fresh/Stale-I 없고 Stale II만 있으면 fallback 사용
+                    if not selectedDish and fallbackStale2 then
+                        selectedDish = fallbackStale2.dish
+                        selectedStaleLevel = fallbackStale2.level
+                        print(string.format(
+                            "[OrderService] S-29.2|ESCAPE_FALLBACK_STALE2 uid=%d dishKey=%s level=%d reason=no_alternative",
+                            player.UserId, fallbackStale2.dish.dishKey, fallbackStale2.level
+                        ))
+                    end
+
+                    if selectedDish then
+                        -- S-24: 기존 주문의 예약 정리
+                        self:ClearReservation(player, slotId, "escape_multi")
+
+                        local recipe = GameData.GetRecipeById(selectedDish.recipeId)
+                        local graceSeconds = ServerFlags.SERVE_GRACE_SECONDS or 15
+                        playerData.orders[slotId] = {
+                            slotId = slotId,
+                            recipeId = selectedDish.recipeId,
+                            reward = recipe and recipe.reward or 50,
+                            reservedDishKey = selectedDish.dishKey,
+                            reservedStaleLevel = selectedStaleLevel,  -- S-29.2: 소비할 버킷 레벨
+                            serveDeadline = os.time() + graceSeconds,  -- S-26 호환: SERVE 유예 시간
+                        }
+                        self:UpdateOrderStamp(player, slotId)
+
+                        -- qty 감소 및 카운트
+                        selectedDish.qty = selectedDish.qty - 1
+                        assignedRecipes[selectedDish.recipeId] = (assignedRecipes[selectedDish.recipeId] or 0) + 1
+                        assignedCount = assignedCount + 1
+
+                        -- W3-NEXT: Hard 레시피면 ORDER_CREATED 로그
+                        W3NextLogger.LogOrderCreated({
+                            recipeId = selectedDish.recipeId,
+                            userId = player.UserId,
+                            slotId = slotId,
+                        })
+
+                        -- S-25: DEBUG 게이팅
+                        if ServerFlags.DEBUG_S24 then
+                            print(string.format(
+                                "[OrderService] S-24|ESCAPE_ASSIGN uid=%d slot=%d dishKey=%s recipeId=%d qtyLeft=%d",
+                                player.UserId, slotId, selectedDish.dishKey, selectedDish.recipeId, selectedDish.qty
+                            ))
+                        end
+
+                        -- S-29: CustomerService 동기화 (고객 리스폰)
+                        -- S-29.1: _escapeCS는 루프 전 캐시됨
+                        if _escapeCS and _escapeCS.RespawnCustomer then
+                            _escapeCS:RespawnCustomer(player, slotId, "escape_multi")
+                        end
+                    end
+                end
+            end
+
+            if assignedCount > 0 then
+                DS:MarkDirty(player)
+
+                -- S-24: 즉시 클라이언트 동기화
+                if _remoteHandler then
+                    _remoteHandler:BroadcastOrders(player, playerData.orders, {
+                        reason = "escape_held_dish",
+                    })
+                    -- S-25: DEBUG 게이팅
+                    if ServerFlags.DEBUG_S24 then
+                        print(string.format(
+                            "[OrderService] S-24|ESCAPE_BROADCAST_ORDERS uid=%d",
+                            player.UserId
+                        ))
+                    end
+                end
+
+                -- S-25: 운영 유지 (저빈도 요약)
+                print(string.format(
+                    "[OrderService] S-24|ESCAPE_MULTI_DONE uid=%d assigned=%d",
+                    player.UserId, assignedCount
+                ))
+
+                return 1  -- 첫 슬롯 반환 (호환성)
+            end
+        end
+    -- S-28: 기존 외부 if 블록 end 제거됨 (orphanCount 기반으로 대체)
 
     -- 이미 탈출 경로가 있으면 OK
     if self:HasEscapePath(playerData) then
@@ -1228,6 +1819,9 @@ function OrderService:ValidateBoardEscapePath(player, excludeSlotId)
         ))
         return nil
     end
+
+    -- S-24: 기존 주문의 예약 정리 (강제 교체 전)
+    self:ClearReservation(player, targetSlot, "escape_forced")
 
     -- 주문 교체
     local recipe = GameData.GetRecipeById(newRecipeId)
@@ -1308,6 +1902,9 @@ function OrderService:ExecuteFailSafeReroll(player, ignoreRestrictions)
         ))
         return false
     end
+
+    -- S-24: 기존 주문의 예약 정리 (failsafe 교체 전)
+    self:ClearReservation(player, targetSlot, "failsafe_reroll")
 
     -- 주문 교체
     local recipe = GameData.GetRecipeById(newRecipeId)
@@ -1397,6 +1994,65 @@ function OrderService:DeliverOrder(player, slotId, playerData)
             success = false,
             error = "no_dish",
             noticeCode = "dish_not_found",
+        }
+    end
+
+    ----------------------------------------------------------------------------
+    -- 1-5. S-24: 예약(Reservation) 검증 (SERVE 정합성 강제)
+    ----------------------------------------------------------------------------
+    local reservedDishKey = order.reservedDishKey
+    local expectedDishKey = dishId  -- "dish_" .. order.recipeId
+
+    -- S-24 로깅: SERVE_ELIGIBLE (진입점 1회) - S-25: DEBUG 게이팅
+    if ServerFlags.DEBUG_S24 then
+        print(string.format("[OrderService] S-24|SERVE_ELIGIBLE uid=%d slot=%d reserved=%s invQty=%d",
+            player.UserId, slotId, reservedDishKey or "nil", dishCount))
+    end
+
+    -- 1-5a. 예약 존재 확인
+    if not reservedDishKey then
+        if hadRunIdAtEntry then
+            finalizeW3Next(player.UserId, slotId)
+        end
+        print(string.format("[OrderService] S-24|SERVE_BLOCKED uid=%d slot=%d reason=no_reserved_dish",
+            player.UserId, slotId))
+        return {
+            success = false,
+            error = "no_reserved_dish",
+            noticeCode = "serve_not_reserved",
+        }
+    end
+
+    -- 1-5b. 예약-recipeId 일관성 검증 (reservation_mismatch 가드)
+    if reservedDishKey ~= expectedDishKey then
+        warn(string.format("[OrderService] S-24|RESERVATION_MISMATCH uid=%d slot=%d reserved=%s expected=%s",
+            player.UserId, slotId, reservedDishKey, expectedDishKey))
+        -- 예약 자동 정리
+        order.reservedDishKey = nil
+        if hadRunIdAtEntry then
+            finalizeW3Next(player.UserId, slotId)
+        end
+        print(string.format("[OrderService] S-24|SERVE_BLOCKED uid=%d slot=%d reason=reservation_mismatch",
+            player.UserId, slotId))
+        return {
+            success = false,
+            error = "reservation_mismatch",
+            noticeCode = "serve_reservation_error",
+        }
+    end
+
+    -- 1-5c. 예약된 dish의 인벤토리 수량 확인 (이중 검증)
+    local reservedQty = playerData.inventory[reservedDishKey] or 0
+    if reservedQty < 1 then
+        if hadRunIdAtEntry then
+            finalizeW3Next(player.UserId, slotId)
+        end
+        print(string.format("[OrderService] S-24|SERVE_BLOCKED uid=%d slot=%d reason=insufficient_inventory",
+            player.UserId, slotId))
+        return {
+            success = false,
+            error = "insufficient_inventory",
+            noticeCode = "serve_no_dish",
         }
     end
 
@@ -1559,6 +2215,9 @@ function OrderService:DeliverOrder(player, slotId, playerData)
         self:SetSlotLock(userId, slotId, false, "deliver_success")
     end
 
+    -- S-29.2: 예약된 stale 레벨 캡처 (슬롯 비우기 전)
+    local reservedStaleLevel = order.reservedStaleLevel
+
     -- 3-1. 주문 슬롯 비움
     playerData.orders[slotId] = nil
 
@@ -1566,6 +2225,19 @@ function OrderService:DeliverOrder(player, slotId, playerData)
     playerData.inventory[dishId] = dishCount - 1
     if playerData.inventory[dishId] <= 0 then
         playerData.inventory[dishId] = nil
+    end
+
+    -- S-29.2: staleCounts 버킷 차감 (Deliver 성공 시)
+    local DS = GetDataService()
+    if reservedStaleLevel ~= nil then
+        local decremented = DS:DecrementStaleBucket(player, dishId, reservedStaleLevel, 1)
+        if not decremented then
+            -- 이론상 발생 안 함 (Reserve에서 검증됨)
+            warn(string.format(
+                "[OrderService] S-29.2|DELIVER_DECREMENT_WARN uid=%d dishKey=%s level=%d",
+                userId, dishId, reservedStaleLevel
+            ))
+        end
     end
 
     -- 3-3. wallet.coins += totalRevenue (P2: reward + tip)
@@ -1592,6 +2264,14 @@ function OrderService:DeliverOrder(player, slotId, playerData)
         "DELIVER_SETTLE uid=%d slot=%d reward=%d tip=%d total=%d wallet=%d score=%s",
         player.UserId, slotId, reward, tip, totalRevenue, playerData.wallet.coins, score
     ))
+
+    --------------------------------------------------------------------------
+    -- PG-2: Customer Serve 처리 (Serve Path Exit Evidence)
+    --------------------------------------------------------------------------
+    local CS = GetCustomerService()
+    if CS and CS.OnServed then
+        CS:OnServed(player, slotId, tip)
+    end
 
     --------------------------------------------------------------------------
     -- P3: threshold 자동 Day End 체크 (Contract v1.4 §5.9)
@@ -1690,6 +2370,7 @@ function OrderService:DeliverOrder(player, slotId, playerData)
             wallet = { coins = playerData.wallet.coins },
             orders = playerData.orders,
             inventory = playerData.inventory,
+            stale2Keys = GetDataService():GetStale2Keys(player),  -- S-30: Stale II 목록 동기화
         },
         analytics = {
             event = "order_deliver",
@@ -1731,6 +2412,199 @@ end
 function OrderService:ShouldRejectAction(player)
     -- RECOVERY 상태면 모든 server-authoritative action 거절
     return self:IsInRecovery(player)
+end
+
+--------------------------------------------------------------------------------
+-- S-30: 수동 폐기 (Stale II만 허용)
+--------------------------------------------------------------------------------
+
+-- S-30: 쿨다운 상태 (uid → lastDiscardTime)
+local ManualDiscardCooldowns = {}
+local MANUAL_DISCARD_COOLDOWN = 0.5  -- 0.5초
+
+--[[
+    S-30: 수동 폐기
+    @param player: Player
+    @param dishKey: string (예: "dish_10")
+    @return { success, error?, noticeCode?, updates? }
+]]
+function OrderService:ManualDiscard(player, dishKey)
+    local DS = GetDataService()
+    local playerData = DS:GetPlayerData(player)
+    local uid = player.UserId
+
+    -- 1. 기본 검증
+    if not playerData then
+        print(string.format("[OrderService] S-30|DISCARD_DENIED uid=%d dishKey=%s reason=no_data", uid, tostring(dishKey)))
+        return { success = false, error = "no_player_data", noticeCode = "data_error" }
+    end
+
+    if type(dishKey) ~= "string" or not string.match(dishKey, "^dish_%d+$") then
+        print(string.format("[OrderService] S-30|DISCARD_DENIED uid=%d dishKey=%s reason=invalid_key", uid, tostring(dishKey)))
+        return { success = false, error = "invalid_key", noticeCode = "discard_failed" }
+    end
+
+    -- 2. 쿨다운 체크 (uid 전역 0.5s)
+    local now = tick()
+    local lastTime = ManualDiscardCooldowns[uid] or 0
+    if (now - lastTime) < MANUAL_DISCARD_COOLDOWN then
+        print(string.format("[OrderService] S-30|DISCARD_DENIED uid=%d dishKey=%s reason=cooldown dt=%.2f", uid, dishKey, now - lastTime))
+        return { success = false, error = "cooldown", noticeCode = "discard_failed" }
+    end
+
+    -- 3. 수량 체크
+    local inventory = playerData.inventory or {}
+    local qty = inventory[dishKey] or 0
+    if qty <= 0 then
+        print(string.format("[OrderService] S-30|DISCARD_DENIED uid=%d dishKey=%s reason=no_qty", uid, dishKey))
+        return { success = false, error = "no_qty", noticeCode = "discard_failed" }
+    end
+
+    -- 4. Stale II 체크
+    local staleCounts = playerData.staleCounts or {}
+    local stale2Qty = (staleCounts[dishKey] and staleCounts[dishKey][2]) or 0
+    if stale2Qty <= 0 then
+        print(string.format("[OrderService] S-30|DISCARD_DENIED uid=%d dishKey=%s reason=not_stale2 stale2=%d", uid, dishKey, stale2Qty))
+        return { success = false, error = "not_stale2", noticeCode = "discard_failed" }
+    end
+
+    -- 5. 폐기 처리 (원자적)
+    -- inventory 감소
+    playerData.inventory[dishKey] = qty - 1
+    if playerData.inventory[dishKey] <= 0 then
+        playerData.inventory[dishKey] = nil  -- 0이면 제거
+    end
+
+    -- staleCounts[2] 감소 (defensive nil check)
+    if not staleCounts[dishKey] then
+        -- 이론상 도달 불가 (4번 체크 통과 시 반드시 존재해야 함)
+        -- 하지만 데이터 레이스/손상 방어
+        warn(string.format("[OrderService] S-30|WARN uid=%d dishKey=%s staleCounts entry unexpectedly nil", uid, dishKey))
+        staleCounts[dishKey] = { [0] = 0, [1] = 0, [2] = stale2Qty }
+    end
+    staleCounts[dishKey][2] = stale2Qty - 1
+    if staleCounts[dishKey][2] < 0 then
+        staleCounts[dishKey][2] = 0  -- 음수 방지 (clamp)
+        warn(string.format("[OrderService] S-30|WARN uid=%d dishKey=%s stale2 went negative, clamped", uid, dishKey))
+    end
+
+    -- 6. 쿨다운 기록
+    ManualDiscardCooldowns[uid] = now
+
+    -- 7. 저장 플래그
+    DS:MarkDirty(player)
+
+    -- 8. 로그
+    local remaining = playerData.inventory[dishKey] or 0
+    print(string.format("[OrderService] S-30|MANUAL_DISCARD uid=%d dishKey=%s level=2 remaining=%d", uid, dishKey, remaining))
+
+    -- 9. 응답 (동기화 포함)
+    return {
+        success = true,
+        noticeCode = "discard_success",
+        updates = {
+            inventory = playerData.inventory,
+            orders = playerData.orders,
+            stale2Keys = DS:GetStale2Keys(player),
+        },
+    }
+end
+
+--------------------------------------------------------------------------------
+-- PG-2: 주문 취소 (손님 patience timeout 등)
+--------------------------------------------------------------------------------
+
+--[[
+    주문 취소 (CustomerService에서 호출)
+    @param player: Player
+    @param slotId: number
+    @param reason: string (patience_timeout, customer_cancel 등)
+    @return boolean (성공 여부)
+]]
+function OrderService:CancelOrder(player, slotId, reason)
+    local DS = GetDataService()
+    local playerData = DS:GetPlayerData(player)
+
+    if not playerData then
+        warn("[OrderService] CancelOrder: no playerData")
+        return false
+    end
+
+    playerData.orders = playerData.orders or {}
+
+    -- idempotent: 이미 비어있으면 성공 처리
+    if not playerData.orders[slotId] then
+        return true
+    end
+
+    -- S-26: patience_timeout 시 serveDeadline 보호
+    -- SERVE 유예 시간 내에는 인내심 타임아웃으로 인한 취소 거부
+    if reason == "patience_timeout" then
+        local order = playerData.orders[slotId]
+        local deadline = order and order.serveDeadline
+        if deadline and deadline > os.time() then
+            -- SERVE 대기 중: 취소 거부 (유예 시간 남음)
+            if IS_STUDIO then
+                print(string.format(
+                    "[OrderService] S-26|CANCEL_BLOCKED uid=%d slot=%d reason=%s remaining=%ds",
+                    player.UserId, slotId, reason, deadline - os.time()
+                ))
+            end
+            return false
+        end
+    end
+
+    local userId = player.UserId
+
+    -- 취소 시 슬롯 락 해제(있으면)
+    if self.IsSlotLocked and self.SetSlotLock and self:IsSlotLocked(userId, slotId) then
+        self:SetSlotLock(userId, slotId, false, "order_canceled:" .. tostring(reason or "unknown"))
+    end
+
+    -- W3-NEXT 정리: 존재할 때만 호출
+    if finalizeW3Next then
+        finalizeW3Next(userId, slotId)
+    end
+
+    -- S-24: 예약 정리 (주문 삭제 전)
+    self:ClearReservation(player, slotId, "order_canceled:" .. tostring(reason or "unknown"))
+
+    -- 주문 삭제
+    playerData.orders[slotId] = nil
+
+    -- DataService dirty 마킹
+    if DS.MarkDirty then
+        DS:MarkDirty(player)
+    end
+
+    -- Exit Evidence (형식 고정)
+    print(string.format(
+        "[OrderService] ORDER_CANCELED uid=%d slot=%d reason=%s",
+        userId, slotId, tostring(reason)
+    ))
+
+    -- SEALED INVARIANT: nil 슬롯 제거(즉시 리필)
+    local filledSlots = {}
+    if self.RefillOrders then
+        filledSlots = self:RefillOrders(player)
+    end
+
+    -- S-29.2 버그픽스: CancelOrder 후에도 ESCAPE 체크
+    -- 이유: patience_timeout 후 orphan 요리가 ESCAPE 매칭되어야 Stale 진행 가능
+    local excludeSlotId = filledSlots[1] or slotId
+    self:ValidateBoardEscapePath(player, excludeSlotId)
+
+    -- 클라이언트 동기화
+    -- S-29.2: inventory 포함 (STALE_DISCARD 후 인벤 변경 반영)
+    if _remoteHandler and _remoteHandler.BroadcastOrders then
+        _remoteHandler:BroadcastOrders(player, playerData.orders, {
+            reason = "order_canceled",
+            slot = slotId,
+            cancelReason = reason,
+        }, playerData.inventory)
+    end
+
+    return true
 end
 
 return OrderService

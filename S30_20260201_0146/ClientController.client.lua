@@ -277,7 +277,19 @@ local function normalizeResponse(response)
 
     -- PG-1: CraftResponse Cook 미니게임 필드
     normalized.mode = response.Mode  -- "cook_minigame" | "timer"
-    normalized.cookSession = response.CookSession  -- { sessionId, seed, gaugeSpeed, uiTargetZone, initialDirection, isTutorial }
+    -- S-15/C-10: FallbackReason (방어적 호환: PascalCase 우선, camelCase 폴백)
+    normalized.fallbackReason = response.FallbackReason or response.fallbackReason
+    -- CookSession: PascalCase → camelCase 변환
+    if response.CookSession then
+        normalized.cookSession = {
+            sessionId = response.CookSession.SessionId,
+            seed = response.CookSession.Seed,
+            gaugeSpeed = response.CookSession.GaugeSpeed,
+            uiTargetZone = response.CookSession.UiTargetZone,
+            isTutorial = response.CookSession.IsTutorial,
+            ttl = response.CookSession.Ttl,
+        }
+    end
 
     -- PG-1: CookTapResponse 필드 (S-07)
     normalized.sessionId = response.SessionId or normalized.sessionId  -- 기존 sessionId 덮어쓰기 방지
@@ -285,6 +297,13 @@ local function normalizeResponse(response)
     normalized.judgment = response.Judgment
     normalized.cookScore = response.CookScore
     normalized.corrected = response.Corrected
+
+    -- S-12: CookTimePhase 필드 (PG-1.1)
+    normalized.cookTimeDuration = response.CookTimeDuration
+
+    -- S-14/C-11: COOK_TIME_COMPLETE 필드 (PG-1.1)
+    normalized.dishKey = response.DishKey
+    normalized.recipeId = response.RecipeId or normalized.recipeId  -- 기존 recipeId 덮어쓰기 방지
 
     -- 2. Updates 정규화 (도메인별 처리)
     if response.Updates then
@@ -307,6 +326,14 @@ local function normalizeResponse(response)
             normalized.updates.inventory = {}
             for key, value in pairs(response.Updates.Inventory) do
                 normalized.updates.inventory[tostring(key)] = value
+            end
+        end
+
+        -- S-30: Stale2Keys → stale2Set 변환 (O(1) 조회용)
+        if response.Updates.Stale2Keys then
+            normalized.updates.stale2Set = {}
+            for _, dishKey in ipairs(response.Updates.Stale2Keys) do
+                normalized.updates.stale2Set[dishKey] = true
             end
         end
 
@@ -548,38 +575,126 @@ local function SetupSyncListener()
         ))
 
         ------------------------------------------------------------------------
-        -- Case 0: PG-1 CookTapResponse 처리 (C-05~C-06)
-        -- 서버 판정 수신 → CookGaugeUI에 확정 표시
+        -- Case 0: PG-1 CookTapResponse 처리 (C-05~C-06, C-09)
+        -- 서버 판정 수신 → CookGaugeUI에 확정 표시 → CookTimePhase 전환
         ------------------------------------------------------------------------
         if scope == "CookTapResponse" then
             local normalized = normalizeResponse(data)
+            local phase = normalized.phase or "nil"
+            local cookTimeDuration = normalized.cookTimeDuration
+
+            -- S-12: CookTimePhase 로그 (Exit Evidence)
             print(string.format(
-                "[Client] CookTapResponse RECV success=%s judgment=%s corrected=%s",
+                "[Client] CookTapResponse RECV success=%s judgment=%s phase=%s duration=%s",
                 tostring(normalized.success),
                 tostring(normalized.judgment),
-                tostring(normalized.corrected)
+                phase,
+                tostring(cookTimeDuration)
             ))
 
             if normalized.success and normalized.judgment then
                 local CookGaugeUI = require(script.Parent.UI.CookGaugeUI)
                 if CookGaugeUI:IsActive() then
                     -- C-05~C-06: 서버 확정 판정 표시
-                    -- corrected: 클라-서버 불일치 여부 (중립 연출, up/down 구분 없음)
                     local wasCorrected = normalized.corrected == true
                     CookGaugeUI:ShowJudgment(normalized.judgment, wasCorrected)
+
+                    ----------------------------------------------------------------
+                    -- C-09: CookTimePhase 전환 (판정 표시 후)
+                    ----------------------------------------------------------------
+                    if phase == "COOK_TIME_START" and cookTimeDuration then
+                        print(string.format(
+                            "[Client] [C-09] CookTimePhase START slotId=%s duration=%.2f",
+                            tostring(normalized.slotId), cookTimeDuration
+                        ))
+
+                        -- 판정 표시 후 CookGaugeUI Hide, CookTimePhase UI로 전환
+                        -- 최소 0.6초 판정 표시 보장 후 전환
+                        local capturedSlotId = normalized.slotId
+                        local capturedDuration = cookTimeDuration
+                        local capturedRecipeId = normalized.recipeId
+
+                        task.delay(0.6, function()
+                            -- S-20: 슬롯 비교 후 조건부 Hide (다른 슬롯 미니게임 보호)
+                            if CookGaugeUI:IsActive() then
+                                local activeSlot = CookGaugeUI:GetActiveSlotId()
+                                if activeSlot == capturedSlotId then
+                                    CookGaugeUI:Hide()
+                                    print(string.format(
+                                        "[CookGaugeUI] Hide reason=COOK_TIME_PHASE_ENTER slotId=%s",
+                                        tostring(capturedSlotId)
+                                    ))
+                                else
+                                    print(string.format(
+                                        "[CookGaugeUI] Hide SKIPPED reason=COOK_TIME_PHASE_ENTER activeSlot=%s capturedSlot=%s",
+                                        tostring(activeSlot), tostring(capturedSlotId)
+                                    ))
+                                end
+                            end
+
+                            -- C-09: MainHUD 타이머 UI 시작 (CookTimePhase)
+                            if MainHUDInstance and MainHUDInstance.StartCookTimePhase then
+                                -- 0.6초 지연 후 남은 시간 계산
+                                local remainingDuration = capturedDuration - 0.6
+                                if remainingDuration > 0 then
+                                    MainHUDInstance:StartCookTimePhase(
+                                        capturedSlotId,
+                                        remainingDuration,
+                                        capturedRecipeId
+                                    )
+                                end
+                            else
+                                warn("[Client] [C-09] MainHUDInstance.StartCookTimePhase not available")
+                            end
+
+                            print(string.format(
+                                "[Client] [C-09] CookTimePhase UI transition slotId=%s remaining=%.2f",
+                                tostring(capturedSlotId), capturedDuration - 0.6
+                            ))
+                        end)
+                    end
                 else
                     warn("[Client] CookTapResponse but CookGaugeUI not active")
                 end
             elseif normalized.success == false then
-                -- 실패 시 UI 숨김
+                -- S-21: 실패 시 슬롯/세션 가드 적용 (멀티태스킹 정합성)
                 local CookGaugeUI = require(script.Parent.UI.CookGaugeUI)
-                CookGaugeUI:Hide()
+                if CookGaugeUI:IsActive() then
+                    local activeSlot = CookGaugeUI:GetActiveSlotId()
+                    local activeSession = CookGaugeUI:GetActiveSessionId()
+                    local slotMatch = (activeSlot == normalized.slotId)
+                    local sessionMatch = (normalized.sessionId == nil)
+                        or (activeSession == nil)
+                        or (activeSession == normalized.sessionId)
+                    if slotMatch and sessionMatch then
+                        CookGaugeUI:Hide()
+                        print(string.format("[CookGaugeUI] Hide reason=FAIL error=%s",
+                            tostring(normalized.error)))
+                    else
+                        print(string.format(
+                            "[CookGaugeUI] Hide SKIPPED (fail) activeSlot=%s eventSlot=%s activeSession=%s eventSession=%s",
+                            tostring(activeSlot), tostring(normalized.slotId),
+                            tostring(activeSession), tostring(normalized.sessionId)
+                        ))
+                    end
+                end
                 print(string.format("[Client] CookTapResponse FAILED error=%s",
                     tostring(normalized.error)))
             end
 
             -- EventBus 발행 (다른 시스템이 필요 시 사용)
             ClientEvents.StateChanged:Fire("CookTapResponse", normalized)
+
+            -- [TEST] S-11 증거: AFTER_TAP dishCount 덤프 (Studio only)
+            if RunService:IsStudio() then
+                local dishCount = 0
+                for key, value in pairs(ClientData.inventory or {}) do
+                    if type(key) == "string" and key:sub(1, 5) == "dish_" then
+                        dishCount = dishCount + (value or 0)
+                    end
+                end
+                print(string.format("[TEST] AFTER_TAP dishCount=%d (from ClientData.inventory)", dishCount))
+            end
         end
 
         ------------------------------------------------------------------------
@@ -606,9 +721,10 @@ local function SetupSyncListener()
                 print(string.format("[Client] CraftResponse RECV slot=%s phase=%s isActive=%s",
                     tostring(slotId), phase, tostring(isActive)))
 
-                -- PG-1: 감리 증거 로그 (C-08 Exit Evidence 포맷)
-                print(string.format("[ClientController] CraftResponse mode=%s slotId=%s recipeId=%s",
-                    mode, tostring(slotId), tostring(recipeId)))
+                -- S-15/C-10: 감리 증거 로그 (Exit Evidence 포맷)
+                local fallbackReasonLog = normalized.fallbackReason or "nil"
+                print(string.format("[Client] [C-10] CraftResponse mode=%s phase=%s fallbackReason=%s slotId=%s",
+                    mode, phase, fallbackReasonLog, tostring(slotId)))
 
                 ----------------------------------------------------------------
                 -- Bug 4 수정 3: 실패 응답 시 craftingState.failed 플래그 주입
@@ -632,62 +748,140 @@ local function SetupSyncListener()
                 end
 
                 ----------------------------------------------------------------
-                -- PG-1: Cook 미니게임 분기 (C-03, C-08)
-                -- Mode == "cook_minigame"이면 CookGaugeUI 표시
-                -- Mode == "timer" (또는 nil)이면 기존 타이머 흐름 (MainHUD에서 처리)
+                -- C-10: CraftResponse 3단 분기 (PG-1.1 Gate)
+                -- 1) mode="timer" + fallbackReason → MODE_TIMER_FALLBACK
+                -- 2) mode="timer" (no reason) → Legacy timer
+                -- 3) mode="cook_minigame" → PG-1/PG-1.1 처리
                 ----------------------------------------------------------------
-                local mode = normalized.mode or "timer"  -- nil이면 timer로 fallback
+                local mode = normalized.mode or "timer"
+                local fallbackReason = normalized.fallbackReason
 
-                -- C-08: timer 모드일 때 CookGaugeUI가 떠 있으면 즉시 Hide (회귀 방지)
-                if mode == "timer" then
+                if mode == "timer" and fallbackReason then
+                    ----------------------------------------------------------------
+                    -- C-10: MODE_TIMER_FALLBACK (FallbackReason 존재 시에만)
+                    ----------------------------------------------------------------
+                    print(string.format(
+                        "[Client] [C-10] TimerFallback mode=timer fallbackReason=%s slotId=%s",
+                        tostring(fallbackReason), tostring(normalized.slotId)
+                    ))
+                    -- S-20: 슬롯 비교 후 조건부 Hide (다른 슬롯 미니게임 보호)
                     local CookGaugeUI = require(script.Parent.UI.CookGaugeUI)
-                    local sessionId = CookGaugeUI:GetSessionId()
                     if CookGaugeUI:IsActive() then
-                        print(string.format(
-                            "[CookGaugeUI] Hide reason=MODE_TIMER_FALLBACK session=%s",
-                            sessionId or "nil"
-                        ))
-                        CookGaugeUI:Hide()
-                    else
-                        print(string.format(
-                            "[CookGaugeUI] Hide reason=MODE_TIMER_FALLBACK session=nil (already hidden)"
-                        ))
+                        local activeSlot = CookGaugeUI:GetActiveSlotId()
+                        if activeSlot == normalized.slotId then
+                            print(string.format(
+                                "[CookGaugeUI] Hide reason=MODE_TIMER_FALLBACK slotId=%s",
+                                tostring(normalized.slotId)
+                            ))
+                            CookGaugeUI:Hide()
+                        else
+                            print(string.format(
+                                "[CookGaugeUI] Hide SKIPPED reason=MODE_TIMER_FALLBACK activeSlot=%s slotId=%s",
+                                tostring(activeSlot), tostring(normalized.slotId)
+                            ))
+                        end
                     end
-                    -- timer 모드: 기존 MainHUD 타이머 흐름
-                    -- TimerFlow 로그 (MainHUD에서 실제 타이머 시작 시 출력됨)
+                    -- timer fallback: MainHUD 타이머 흐름으로 진행
+                elseif mode == "timer" then
+                    ----------------------------------------------------------------
+                    -- C-10: Legacy timer (fallbackReason 없음, 향후 제거 가능)
+                    ----------------------------------------------------------------
+                    print(string.format(
+                        "[Client] [C-10] LegacyTimer mode=timer slotId=%s (no fallbackReason)",
+                        tostring(normalized.slotId)
+                    ))
+                    -- Legacy timer 경로: 기존 MainHUD 처리
                 end
+                -- mode="cook_minigame"은 아래 별도 블록에서 처리
 
                 if normalized.success and mode == "cook_minigame" then
-                    local cookSession = normalized.cookSession
-                    if cookSession then
-                        -- slotId 주입 (콜백에서 필요)
-                        cookSession.slotId = normalized.slotId
+                    ----------------------------------------------------------------
+                    -- C-11: Phase 기반 cook_minigame 분기 (PG-1.1)
+                    -- MINIGAME_START (또는 nil): CookGaugeUI 표시
+                    -- COOK_TIME_COMPLETE: CookTimePhase 완료 처리
+                    ----------------------------------------------------------------
+                    local phase = normalized.phase
 
-                        local CookGaugeUI = require(script.Parent.UI.CookGaugeUI)
-                        CookGaugeUI:Show(cookSession, function(tapData)
-                            -- RE_SubmitCookTap 전송 (최소 페이로드: sessionId, slotId만)
-                            local RE_SubmitCookTap = Remotes:FindFirstChild("RE_SubmitCookTap")
-                            if RE_SubmitCookTap then
-                                print(string.format(
-                                    "[Client] SubmitCookTap session=%s slot=%d clientPos=%.2f",
-                                    tapData.sessionId or "nil",
-                                    tapData.slotId or 0,
-                                    tapData.clientPos or 0
-                                ))
-                                -- 파라미터 순서: slotId, sessionId (서버 OnServerEvent와 일치)
-                                RE_SubmitCookTap:FireServer(tapData.slotId, tapData.sessionId)
-                            else
-                                warn("[Client] RE_SubmitCookTap not found")
-                            end
-                        end)
-
+                    if phase == "COOK_TIME_COMPLETE" then
+                        ----------------------------------------------------------------
+                        -- C-11: COOK_TIME_COMPLETE 처리 (S-14 완료 응답)
+                        -- dish 생성 완료 → CookTimePhase UI 숨김 → Serve 전환
+                        ----------------------------------------------------------------
                         print(string.format(
-                            "[Client] CookGaugeUI shown for session=%s slot=%d",
-                            cookSession.sessionId or "nil",
-                            normalized.slotId or 0
+                            "[Client] [C-11] CookTimePhase COMPLETE slotId=%s dishKey=%s recipeId=%s",
+                            tostring(normalized.slotId),
+                            tostring(normalized.dishKey),
+                            tostring(normalized.recipeId)
                         ))
+
+                        -- S-20: CookGaugeUI 조건부 Hide (슬롯+세션 정합성 가드)
+                        -- 완료된 슬롯과 활성 슬롯이 일치할 때만 Hide (다른 슬롯 미니게임 보호)
+                        local CookGaugeUI = require(script.Parent.UI.CookGaugeUI)
+                        if CookGaugeUI:IsActive() then
+                            local activeSlot = CookGaugeUI:GetActiveSlotId()
+                            local activeSession = CookGaugeUI:GetActiveSessionId()
+
+                            local slotMatch = (activeSlot == normalized.slotId)
+                            local sessionMatch = (normalized.sessionId == nil)
+                                or (activeSession == nil)
+                                or (activeSession == normalized.sessionId)
+
+                            if slotMatch and sessionMatch then
+                                CookGaugeUI:Hide()
+                                print("[CookGaugeUI] Hide reason=COOK_TIME_COMPLETE")
+                            else
+                                print(string.format(
+                                    "[CookGaugeUI] Hide SKIPPED activeSlot=%s completedSlot=%s activeSession=%s completedSession=%s",
+                                    tostring(activeSlot), tostring(normalized.slotId),
+                                    tostring(activeSession), tostring(normalized.sessionId)
+                                ))
+                            end
+                        end
+
+                        -- C-11: MainHUD 타이머 UI 완료 (CookTimePhase → SERVE 전환)
+                        if MainHUDInstance and MainHUDInstance.CompleteCookTimePhase then
+                            MainHUDInstance:CompleteCookTimePhase(normalized.slotId)
+                        else
+                            warn("[Client] [C-11] MainHUDInstance.CompleteCookTimePhase not available")
+                        end
+
+                        -- Inventory 업데이트는 Updates 통해 MainHUD에서 처리됨
+                        -- (ClientEvents.StateChanged → MainHUD 리스너)
                     else
-                        warn("[Client] cook_minigame mode but no cookSession")
+                        ----------------------------------------------------------------
+                        -- MINIGAME_START (또는 nil): 기존 CookGaugeUI 표시 로직
+                        ----------------------------------------------------------------
+                        local cookSession = normalized.cookSession
+                        if cookSession then
+                            -- slotId 주입 (콜백에서 필요)
+                            cookSession.slotId = normalized.slotId
+
+                            local CookGaugeUI = require(script.Parent.UI.CookGaugeUI)
+                            CookGaugeUI:Show(cookSession, function(tapData)
+                                -- RE_SubmitCookTap 전송 (최소 페이로드: sessionId, slotId만)
+                                local RE_SubmitCookTap = Remotes:FindFirstChild("RE_SubmitCookTap")
+                                if RE_SubmitCookTap then
+                                    print(string.format(
+                                        "[Client] SubmitCookTap session=%s slot=%d clientPos=%.2f",
+                                        tapData.sessionId or "nil",
+                                        tapData.slotId or 0,
+                                        tapData.clientPos or 0
+                                    ))
+                                    -- 파라미터 순서: slotId, sessionId (서버 OnServerEvent와 일치)
+                                    RE_SubmitCookTap:FireServer(tapData.slotId, tapData.sessionId)
+                                else
+                                    warn("[Client] RE_SubmitCookTap not found")
+                                end
+                            end)
+
+                            print(string.format(
+                                "[Client] CookGaugeUI shown for session=%s slot=%d",
+                                cookSession.sessionId or "nil",
+                                normalized.slotId or 0
+                            ))
+                        else
+                            warn("[Client] cook_minigame mode but no cookSession (phase=%s)", phase or "nil")
+                        end
                     end
                 end
             end
@@ -790,6 +984,11 @@ local function SetupSyncListener()
                 if normalized.updates.cooldown then
                     ClientData.cooldown = normalized.updates.cooldown
                     updatedScopes["cooldown"] = true
+                end
+                -- S-30: stale2Set 적용 (스냅샷 - 전체 재구성)
+                if normalized.updates.stale2Set then
+                    ClientData.stale2Set = normalized.updates.stale2Set
+                    updatedScopes["stale2Set"] = true
                 end
                 if normalized.updates.tutorial then
                     -- 병합 정책: hasCompleted만 갱신, ui는 보존 (Presentation-only)
@@ -983,9 +1182,18 @@ end
 local function SetupNoticeListener()
     local RE_ShowNotice = Remotes:WaitForChild("RE_ShowNotice")
 
-    RE_ShowNotice.OnClientEvent:Connect(function(code, severity, messageKey)
-        print(string.format("[Notice] [%s] %s (Code: %s)", severity, messageKey, code))
-        NoticeUI.Show(code, severity, messageKey)
+    RE_ShowNotice.OnClientEvent:Connect(function(code, severity, messageKey, extra)
+        -- PG-1 Bug #1 Fix: session_consumed는 예상 동작(더블탭)이므로 silent fail
+        -- 감리 승인: ChatGPT 2026-01-25 (Notice UI 팝업 없이 debug 로그만)
+        if code == "session_consumed" or code == "cook_already_submitted" then
+            print(string.format("[Notice] SUPPRESSED code=%s (expected double-tap)", code))
+            return
+        end
+
+        -- A: extra에 dishKey가 있으면 로그에 포함
+        local extraInfo = extra and extra.dishKey or "nil"
+        print(string.format("[Notice] [%s] %s (Code: %s, dishKey: %s)", severity, messageKey, code, extraInfo))
+        NoticeUI.Show(code, severity, messageKey, extra)
     end)
 end
 
