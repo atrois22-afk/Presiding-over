@@ -431,6 +431,35 @@ UI_RENDER candidates=0 (패널 숨김)
 
 ---
 
+### S-35: 감리 피드백 반영 (P0+P1)
+
+**감리자:** ChatGPT (2026-02-01)
+**판정:** 구조/아키텍처 타당, P0 3개 + P1 2개 보강 필요
+
+**P0 수정 (필수):**
+
+| # | 지적 | 수정 내용 |
+|---|------|----------|
+| 1 | rid 가드 없음 | `_s35LastRequestedRid` 추가, 응답 시 stale_rid 무시 |
+| 2 | StateChanged 순서 | inventory → stale2Set → orders → wallet → cooldown |
+| 3 | schema_violation warn | `SNAPSHOT_APPLY_WARN` 로그 추가 (D7 준수) |
+
+**P1 수정 (권장):**
+
+| # | 지적 | 수정 내용 |
+|---|------|----------|
+| 1 | orders deep copy | nested table 안전 복사 추가 |
+| 2 | rate-limit cleanup | PlayerRemoving에서 cache 정리 |
+
+**수정 파일:**
+- `ClientController.client.lua`: rid 가드, 순서 수정, schema warn
+- `DataService.lua`: orders deep copy 보강
+- `RemoteHandler.lua`: PlayerRemoving cleanup 추가
+
+**상태:** ✅ P0+P1 반영 완료 (재감리 대기)
+
+---
+
 ## 2026-01-31
 
 ### NoticeUI 최소 표시 시간 + 다중 큐 지원 (v0.2.3.4)

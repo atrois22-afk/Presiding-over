@@ -574,6 +574,12 @@ function RemoteHandler:ConnectRemotes()
         local _s35RateLimitCache = {}
         local S35_RATE_LIMIT_SECONDS = 30
 
+        -- P1-2: PlayerRemoving cleanup (메모리 누적 방지)
+        local Players = game:GetService("Players")
+        Players.PlayerRemoving:Connect(function(player)
+            _s35RateLimitCache[player.UserId] = nil
+        end)
+
         RE_RequestFullSnapshot.OnServerEvent:Connect(function(player, reasonKey, requestId)
             local uid = player.UserId
             local now = tick()

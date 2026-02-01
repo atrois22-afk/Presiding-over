@@ -76,9 +76,9 @@
   - ClientData.stale2Set = ToSet(snapshot.Stale2Keys)
   - ClientData.wallet = snapshot.wallet
   - ClientData.cooldown = snapshot.cooldown
-- [ ] 스키마 위반이어도 **적용** + `S-35|SNAPSHOT_APPLY_WARN schema_violation=...` (P2)
-- [x] apply 후 StateChanged 발화(최소):
-  - inventory, orders, stale2Set, wallet, cooldown
+- [x] **P0-1: rid 가드** - `_s35LastRequestedRid` 비교, stale_rid 무시
+- [x] **P0-3: 스키마 위반 warn** - `S-35|SNAPSHOT_APPLY_WARN schema_violation=...`
+- [x] **P0-2: StateChanged 발화 순서** - inventory → stale2Set → orders → wallet → cooldown
 
 ### C6. RECOVERY 연계
 - [ ] 클라가 RECOVERY(또는 동등 상태)면 요청 skip (Server에서 처리)
@@ -93,6 +93,7 @@
 - [x] 차단 시:
   - 전송하지 않음
   - `S-35|SNAPSHOT_DROP uid=... reason=rate_limit`
+- [x] **P1-2: PlayerRemoving cleanup** - 메모리 누적 방지
 
 ### S2. bad_state 처리
 - [x] PlayerData 없음 / 로드 실패 / RECOVERY 상태면:
@@ -101,7 +102,7 @@
 
 ### S3. Snapshot payload 구성
 - [x] inventory (S-36 혼합 스키마) - deep copy
-- [x] orders (reserved* 포함) - deep copy
+- [x] orders (reserved* 포함) - **P1-1: nested table 안전 복사**
 - [x] Stale2Keys (배열) - GetStale2Keys() 호출
 - [x] wallet / cooldown
 - [x] 전송 로그: `S-35|SNAPSHOT_SERVE uid=... bytes=... reason=<auditKey>`

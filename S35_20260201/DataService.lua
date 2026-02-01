@@ -1351,13 +1351,21 @@ function DataService:BuildFullSnapshot(player, requestId, reasonKey)
         end
     end
 
-    -- orders (reserved* 포함)
+    -- orders (reserved* 포함) - P1: deep copy 보강
     snapshot.orders = {}
     if playerData.orders then
         for slotId, order in pairs(playerData.orders) do
             snapshot.orders[slotId] = {}
             for field, value in pairs(order) do
-                snapshot.orders[slotId][field] = value
+                -- nested table 안전 복사 (primitive 우선, table이면 shallow copy)
+                if type(value) == "table" then
+                    snapshot.orders[slotId][field] = {}
+                    for k, v in pairs(value) do
+                        snapshot.orders[slotId][field][k] = v
+                    end
+                else
+                    snapshot.orders[slotId][field] = value
+                end
             end
         end
     end

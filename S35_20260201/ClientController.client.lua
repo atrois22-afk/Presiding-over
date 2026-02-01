@@ -237,6 +237,7 @@ local S35_REVALIDATION_DELAY = 1.0  -- inv_negative 재검증 대기
 local _s35LastRequestAt = 0         -- 마지막 snapshot 요청 시각
 local _s35PendingDebounce = nil     -- debounce 대기 중인 auditKey
 local _s35NextRequestId = 1         -- requestId 생성용 카운터
+local _s35LastRequestedRid = 0      -- P0: stale response 방지용 (마지막 요청 rid)
 local _s35PendingRevalidation = nil -- inv_negative 재검증 대기 상태
 
 -- S-35 Remote 참조 (Initialize에서 설정)
@@ -270,6 +271,7 @@ local function _s35SendRequest(auditKey, ctx)
     local uid = Players.LocalPlayer and Players.LocalPlayer.UserId or 0
     local requestId = _s35NextRequestId
     _s35NextRequestId = _s35NextRequestId + 1
+    _s35LastRequestedRid = requestId  -- P0: stale response 방지용
     _s35LastRequestAt = tick()
 
     print(string.format("[Client] S-35|SNAPSHOT_REQ key=%s uid=%d rid=%d ctx=%s",
@@ -1311,24 +1313,51 @@ local function SetupSyncListener()
             local snapshot = data
             local rid = snapshot.requestId or 0
             local reasonKey = snapshot.reasonKey or "unknown"
+            local uid = Players.LocalPlayer and Players.LocalPlayer.UserId or 0
 
-            print(string.format("[Client] S-35|SNAPSHOT_APPLY rid=%d reason=%s", rid, tostring(reasonKey)))
+            -- P0-1: rid 가드 (stale response 무시)
+            if rid < _s35LastRequestedRid then
+                warn(string.format("[Client] S-35|SNAPSHOT_SKIP uid=%d reason=stale_rid received=%d expected=%d",
+                    uid, rid, _s35LastRequestedRid))
+                return
+            end
+
+            -- P0-3: schema_violation 검사 (D7: 위반해도 apply, warn만)
+            local schemaWarnings = {}
+            if snapshot.inventory then
+                for key, qty in pairs(snapshot.inventory) do
+                    if type(key) == "string" and string.match(key, "^dish_") then
+                        if not string.match(key, "^dish_%d+$") then
+                            table.insert(schemaWarnings, "inv_bad_key:" .. tostring(key))
+                        end
+                    end
+                    if type(qty) == "number" and qty < 0 then
+                        table.insert(schemaWarnings, "inv_negative:" .. tostring(key))
+                    end
+                end
+            end
+            if #schemaWarnings > 0 then
+                warn(string.format("[Client] S-35|SNAPSHOT_APPLY_WARN uid=%d schema_violation=%s",
+                    uid, table.concat(schemaWarnings, ",")))
+            end
+
+            print(string.format("[Client] S-35|SNAPSHOT_APPLY uid=%d rid=%d reason=%s", uid, rid, tostring(reasonKey)))
 
             -- I35-01: 서버 권위 덮어쓰기 (merge 금지)
             if snapshot.inventory then
                 ClientData.inventory = snapshot.inventory
             end
 
-            if snapshot.orders then
-                ClientData.orders = snapshot.orders
-            end
-
-            -- Stale2Keys → stale2Set 변환
+            -- Stale2Keys → stale2Set 변환 (inventory 직후, P0-2 순서)
             if snapshot.Stale2Keys then
                 ClientData.stale2Set = {}
                 for _, key in ipairs(snapshot.Stale2Keys) do
                     ClientData.stale2Set[key] = true
                 end
+            end
+
+            if snapshot.orders then
+                ClientData.orders = snapshot.orders
             end
 
             if snapshot.wallet then
@@ -1339,14 +1368,14 @@ local function SetupSyncListener()
                 ClientData.cooldown = snapshot.cooldown
             end
 
-            -- StateChanged 발화 (순서: inventory → orders → stale2Set → wallet → cooldown)
+            -- P0-2: StateChanged 발화 (순서: inventory → stale2Set → orders → wallet → cooldown)
             ClientEvents.StateChanged:Fire("inventory", ClientData.inventory)
-            ClientEvents.StateChanged:Fire("orders", ClientData.orders)
             ClientEvents.StateChanged:Fire("stale2Set", ClientData.stale2Set)
+            ClientEvents.StateChanged:Fire("orders", ClientData.orders)
             ClientEvents.StateChanged:Fire("wallet", ClientData.wallet)
             ClientEvents.StateChanged:Fire("cooldown", ClientData.cooldown)
 
-            print(string.format("[Client] S-35|SNAPSHOT_APPLY scopes=inventory,orders,stale2Set,wallet,cooldown rid=%d", rid))
+            print(string.format("[Client] S-35|SNAPSHOT_APPLY uid=%d rid=%d scopes=inventory,stale2Set,orders,wallet,cooldown", uid, rid))
 
         ------------------------------------------------------------------------
         -- Case 3: Unknown scope 가드 (Phase 7-A S-07A-02)
